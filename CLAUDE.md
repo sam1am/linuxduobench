@@ -11,15 +11,19 @@ Details: `docs/brick-record.md`, `docs/bootloader-facts.md`.
 
 1. **Never lock.** No `fastboot flashing lock`, `flashing lock_critical`, or any relock step.
 2. **Never touch AVB keys.** No `fastboot flash avb_custom_key`, no `erase avb_custom_key`, no self-signed vbmeta.
-3. **Never write, erase, format or discard anything on the boot storage units:**
-   - `sde` (all of it): `boot_*`, `vbmeta_*`, `dtbo_*`, `abl_*`, `tz_*`, `hyp_*`, `aop_*`, `keymaster_*`, `modem_*`,
-     `dsp_*`, `bluetooth_*`, `cmnlib*`, `devcfg_*`, `qupfw_*`, `uefisecapp_*`, `sftpfw_*`, `devinfo`, `apdp`,
-     `uefivarstore`, `logfs`, `secdata`
-   - `sdb`, `sdc` (`xbl_*`, `xbl_config_*`), `sdd` (`ddr`, `sfpd`), `sdf` (`modemst1`, `modemst2`, `fsg`, `fsc`)
-   - on `sda`: `ssd`, `persist`, `frp`, `misc`, `metadata`
-   - on `sdg`: `super`, `vbmeta_system_*`
+3. **Never write, erase, format or discard any of these partitions** (named by GPT partition name and UFS unit):
+   - UFS unit 4, the boot unit (all of it): `boot_*`, `vbmeta_*`, `dtbo_*`, `abl_*`, `tz_*`, `hyp_*`, `aop_*`,
+     `keymaster_*`, `modem_*`, `dsp_*`, `bluetooth_*`, `cmnlib*`, `devcfg_*`, `qupfw_*`, `uefisecapp_*`, `sftpfw_*`,
+     `devinfo`, `apdp`, `uefivarstore`, `logfs`, `secdata`
+   - UFS units 1 and 2 (`xbl_*`, `xbl_config_*`), unit 3 (`ddr`, `sfpd`), unit 5 (`modemst1`, `modemst2`, `fsg`, `fsc`)
+   - on unit 0: `ssd`, `persist`, `frp`, `misc`, `metadata`
+   - on unit 6: `super`, `vbmeta_system_*`
    This applies from fastboot, from Android, from TWRP and from a running Linux (`dd`, `cat >`, `mkfs`, `blkdiscard`,
    `wipefs`, `fastboot flash`, `fastboot erase`).
+   **Never address a partition by its `sdX` letter.** The letters change between boots: on 2026-11-11 the boot unit
+   was `sde` on one boot and `sdf` on the next. Before any write, resolve the target by partition name
+   (`PARTNAME=` in `/sys/class/block/*/uevent`), then confirm with `blkid` that its `PARTLABEL` and current
+   filesystem type are what you expect, in the same command that does the write.
 4. **Never change slot state from an OS.** No `qbootctl` (any option), no `bootctl`, no `sgdisk`/`sfdisk`/`parted`/
    `gdisk` attribute edits, no UFS `bBootLunEn` changes. Never let `qbootctl.service` run in an installed system.
    The only slot command allowed is `fastboot --set-active=a` immediately before `fastboot boot` (it does not persist).
@@ -49,13 +53,13 @@ Details: `docs/brick-record.md`, `docs/bootloader-facts.md`.
 
 ## Needs the user's explicit approval each time
 
-- Anything that destroys data: reformatting or writing the `win` (`sda8`), `esp` (`sda7`) or `userdata` (`sda6`)
-  partitions. Say what will be lost and wait for a yes.
+- Anything that destroys data: reformatting or writing the `win`, `esp` or `userdata` partitions
+  (unit 0; found by name, never by letter). Say what will be lost and wait for a yes.
 
 ## This phone
 
-- Surface Duo 1, bootloader 2022.815.527, unlocked, Windows-on-ARM partition layout (`esp` = `sda7`, `win` = `sda8`,
-  small `userdata` = `sda6`). Android and Windows are expendable but wiping needs approval first.
+- Surface Duo 1, bootloader 2022.815.527, unlocked, Windows-on-ARM partition layout (`esp`, `win` of about 99.7 GiB and a 4 GiB
+  `userdata`, all on UFS unit 0). Android and Windows are expendable but wiping needs approval first.
 - Plan: Debian root on the `win` partition (`duo.root=win`), always booted tethered. Android stays intact as the
   fallback.
 - The upstream RAM image's `/init` mounts `esp` read-write and writes crash logs there; use the patched init in this
