@@ -10,7 +10,8 @@ while :; do
 	# USB stall = only while the cable is still ATTACHED to a host (UDC "configured"): unplugging from the PC or
 	# plugging in a USB-C dock (the phone becomes the host) is normal use, not a dead link (2026-11-07: the old check
 	# rebooted the phone 60 s after every unplug). After a detach, wait for traffic again before arming the check.
-	if [ -r $RX ] && [ "$(cat /sys/class/udc/*/state 2>/dev/null | head -1)" = configured ]; then
+	# (this fork: duo.nousbwdt=1 turns the USB check off - a Mac sends no steady traffic on an idle link)
+	if [ -r $RX ] && ! grep -q duo.nousbwdt=1 /proc/cmdline && [ "$(cat /sys/class/udc/*/state 2>/dev/null | head -1)" = configured ]; then
 		now=$(cat $RX)
 		if [ "$now" != "$last" ]; then [ "$last" != -1 ] && seen=1; still=0; last=$now; else still=$((still + 5)); fi
 		[ $seen = 1 ] && [ $still -ge 60 ] && stop_petting "no USB traffic for ${still}s"

@@ -42,6 +42,10 @@ printf 'export PATH=%s\nexport PS1="duo:\\w# "\n' "$PATH" > /etc/profile.d/duo.s
 # panels); the initramfs files do not (switch_root deletes them), so nothing started here may exec a program later -
 # the watchdog feeder below uses shell built-ins only (echo, read -t) and keeps running from memory. If the partition
 # cannot be mounted, the normal RAM workbench below starts instead (SSH as always).
+# this fork: the USB network function is ECM (macOS never brought the NCM link up); duo.usbnet=ncm = upstream's NCM.
+# vendor_a's place inside super differs between phones: duo.vendor_sector=<512-byte sector> overrides upstream's value.
+UF=ecm; grep -q 'duo.usbnet=ncm' /proc/cmdline && UF=ncm
+VS=$(sed -n 's/.*duo\.vendor_sector=\([0-9]*\).*/\1/p' /proc/cmdline); VS=${VS:-11369472}
 DR=$(sed -n 's/.*duo\.root=\([A-Za-z0-9_-]*\).*/\1/p' /proc/cmdline)
 if [ -n "$DR" ]; then
   rlog() { echo "duo-linux root: $*" > /dev/kmsg; }
@@ -68,13 +72,13 @@ if [ -n "$DR" ]; then
   # USB gadget (ACM + NCM) + the PC link addresses, as in the RAM workbench; the installed system's sshd serves them
   G=/sys/kernel/config/usb_gadget/duo; mkdir -p $G; ( cd $G
     echo 0x18d1 > idVendor; echo 0x4ee7 > idProduct
-    mkdir -p strings/0x409 configs/c.1/strings/0x409 functions/acm.usb0 functions/ncm.usb0
+    mkdir -p strings/0x409 configs/c.1/strings/0x409 functions/acm.usb0 functions/$UF.usb0
     echo "Surface Duo mainline" > strings/0x409/product; echo "duo-linux" > strings/0x409/serialnumber
-    echo "acm+ncm" > configs/c.1/strings/0x409/configuration
-    ln -s functions/acm.usb0 configs/c.1/ 2>/dev/null; ln -s functions/ncm.usb0 configs/c.1/ 2>/dev/null
+    echo "acm+$UF" > configs/c.1/strings/0x409/configuration
+    ln -s functions/acm.usb0 configs/c.1/ 2>/dev/null; ln -s functions/$UF.usb0 configs/c.1/ 2>/dev/null
     for i in $(seq 1 30); do UDC=$(ls /sys/class/udc 2>/dev/null | head -1); [ -n "$UDC" ] && break; sleep 1; done
     echo "$UDC" > UDC 2>/dev/null )
-  IF=$(cat $G/functions/ncm.usb0/ifname 2>/dev/null); IF=${IF:-usb0}
+  IF=$(cat $G/functions/$UF.usb0/ifname 2>/dev/null); IF=${IF:-usb0}
   for i in $(seq 1 20); do [ -e /sys/class/net/$IF ] && break; sleep 0.5; done
   ip link set lo up; ip link set $IF up; ip addr add 169.254.66.1/16 dev $IF; ip addr add 10.66.0.1/24 dev $IF
   rlog "usb $IF: $(ip -4 -o addr show dev $IF | awk '{print $4}' | tr '\n' ' ')"
@@ -214,11 +218,11 @@ fi
 G=/sys/kernel/config/usb_gadget/duo
 mkdir -p $G; cd $G
 echo 0x18d1 > idVendor; echo 0x4ee7 > idProduct
-mkdir -p strings/0x409 configs/c.1/strings/0x409 functions/acm.usb0 functions/ncm.usb0
+mkdir -p strings/0x409 configs/c.1/strings/0x409 functions/acm.usb0 functions/$UF.usb0
 echo "Surface Duo mainline" > strings/0x409/product; echo "duo-linux" > strings/0x409/serialnumber
-echo "acm+ncm" > configs/c.1/strings/0x409/configuration
+echo "acm+$UF" > configs/c.1/strings/0x409/configuration
 ln -s functions/acm.usb0 configs/c.1/ 2>/dev/null
-ln -s functions/ncm.usb0 configs/c.1/ 2>/dev/null
+ln -s functions/$UF.usb0 configs/c.1/ 2>/dev/null
 for i in $(seq 1 30); do UDC=$(ls /sys/class/udc 2>/dev/null | head -1); [ -n "$UDC" ] && break; sleep 1; done
 echo "$UDC" > UDC 2>/dev/null
 echo "duo-linux usb gadget udc=[$UDC]" > /dev/kmsg
@@ -228,7 +232,7 @@ echo "duo-linux usb gadget udc=[$UDC]" > /dev/kmsg
 # SSH: dropbear, key-only root (authorized_keys baked into the initramfs). Every step is logged to the kernel log.
 (
   log () { echo "duo-linux net: $*" > /dev/kmsg; }
-  IF=$(cat functions/ncm.usb0/ifname 2>/dev/null); IF=${IF:-usb0}
+  IF=$(cat functions/$UF.usb0/ifname 2>/dev/null); IF=${IF:-usb0}
   for i in $(seq 1 20); do [ -e /sys/class/net/$IF ] && break; sleep 0.5; done
   log "if=$IF present=$([ -e /sys/class/net/$IF ] && echo y || echo n)"
   ip link set lo up; ip link set $IF up
@@ -338,7 +342,7 @@ fi
   part() { for d in /sys/class/block/sd*; do grep -q "^PARTNAME=$1\$" $d/uevent && echo ${d##*/}; done; }
   for i in $(seq 1 120); do S=$(part super); [ -n "$S" ] && break; sleep 0.5; done
   V=/mnt/vendor-fw; mkdir -p $V /lib/firmware/qcom
-  [ -n "$S" ] && L=$(losetup -f) && losetup -r -o $((11369472 * 512)) $L /dev/$S && mount -o ro $L $V || {
+  [ -n "$S" ] && L=$(losetup -f) && losetup -r -o $((VS * 512)) $L /dev/$S && mount -o ro $L $V || {
     echo "duo-linux gpu: vendor_a not mapped (super=$S)" > /dev/kmsg; exit 0; }
   n=0; for f in $V/firmware/a630_sqe.fw $V/firmware/a640_gmu.bin $V/firmware/a640_zap.*; do
     [ -e "$f" ] || continue; ln -sf "$f" /lib/firmware/qcom/${f##*/}; n=$((n+1)); done
@@ -489,9 +493,9 @@ fi
     # vendor_a is a dynamic partition inside "super" (no GPT entry). Droidian's dm table (2026-11-03):
     # dynpart-vendor_a = linear, ONE extent, super sector 11369472, 1412144 sectors -> read-only loop at that offset.
     S=$(part super)
-    if [ -n "$S" ] && L=$(losetup -f) && losetup -r -o $((11369472 * 512)) $L /dev/$S && \
+    if [ -n "$S" ] && L=$(losetup -f) && losetup -r -o $((VS * 512)) $L /dev/$S && \
        mount -t ext4 -o ro $L $H/vendor; then
-      slog "vendor_a mounted ro from super ($S @ sector 11369472 via $L)"
+      slog "vendor_a mounted ro from super ($S @ sector $VS via $L)"
     else
       [ -n "$L" ] && losetup -d $L 2>/dev/null
       # fallback: the phone's own /vendor/etc/sensors, copied to the ESP from Droidian (never in the repo)
