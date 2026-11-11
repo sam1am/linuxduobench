@@ -14,7 +14,7 @@ MR=$(curl -s $AL/releases/aarch64/latest-releases.yaml | grep -o 'alpine-miniroo
 for r in main community; do curl -s $AL/$r/aarch64/APKINDEX.tar.gz | tar -xzO APKINDEX > APKINDEX.$r; done
 cd $W/root; tar -xzf $C/$MR
 awk -F: '$1=="P"{print $2}' lib/apk/db/installed > $C/installed.txt
-PKGS="alsa-utils dropbear dropbear-scp e2fsprogs e2fsprogs-extra sgdisk dosfstools ntfs-3g-progs lsblk blkid sfdisk
+PKGS="alsa-utils dropbear dropbear-scp e2fsprogs e2fsprogs-extra dosfstools ntfs-3g-progs lsblk blkid
       util-linux-misc zstd pciutils usbutils i2c-tools evtest strace file less nano htop tmux
       libgpiod openssh-sftp-server
       iw wpa_supplicant wireless-regdb linux-firmware-ath10k eudev-libs
@@ -48,5 +48,5 @@ if [ -n "$FW" ]; then mkdir -p lib/firmware/qcom/sm8150/microsoft; cp "$FW" lib/
 if [ -n "$KEY" ]; then mkdir -p root/.ssh etc/dropbear; tr -d '\r' < "$KEY" > root/.ssh/authorized_keys
   chmod 700 root/.ssh; chmod 600 root/.ssh/authorized_keys; fi
 echo duo > etc/hostname
-for t in usr/sbin/dropbear usr/bin/rmtfs usr/bin/tqftpserv usr/sbin/iw sbin/wpa_supplicant lib/firmware/ath10k/WCN3990/hw1.0/firmware-5.bin.zst usr/bin/speaker-test sbin/mkfs.ext4 usr/bin/sgdisk usr/sbin/resize2fs usr/local/bin/devmem usr/local/bin/drmfill bin/busybox; do [ -e $t ] && echo "ok $t" || echo "MISSING $t"; done
+for t in usr/sbin/dropbear usr/bin/rmtfs usr/bin/tqftpserv usr/sbin/iw sbin/wpa_supplicant lib/firmware/ath10k/WCN3990/hw1.0/firmware-5.bin.zst usr/bin/speaker-test sbin/mkfs.ext4 usr/sbin/resize2fs usr/local/bin/devmem usr/local/bin/drmfill bin/busybox; do [ -e $t ] && echo "ok $t" || echo "MISSING $t"; done
 find . | cpio -o -H newc 2>/dev/null | gzip -9 > "$OUT"; ls -la "$OUT"

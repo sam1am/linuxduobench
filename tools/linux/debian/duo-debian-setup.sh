@@ -12,7 +12,7 @@ apt-get -q -y -t trixie-backports install libegl-mesa0 libgbm1 libgl1-mesa-dri l
   mesa-vulkan-drivers > /tmp/apt-mesa.log 2>&1 || tail -3 /tmp/apt-mesa.log
 apt-get -q -y --no-install-recommends install sddm hexagonrpcd iio-sensor-proxy modemmanager rmtfs tqftpserv \
   protection-domain-mapper qrtr-tools umtp-responder avahi-daemon alsa-ucm-conf python3-dbus python3-gi \
-  netcat-openbsd psmisc libqmi-utils iproute2 qbootctl gdisk accountsservice \
+  netcat-openbsd psmisc libqmi-utils iproute2 accountsservice \
   kmod wpasupplicant bluez systemd-timesyncd ca-certificates systemd-coredump nftables musl \
   bluedevil hfd-service kde-cli-tools kio-extras ksystemstats systemsettings \
   opensnitch python3-opensnitch-ui qtwayland5 chromium gnome-snapshot > /tmp/apt.log 2>&1 \
@@ -110,10 +110,12 @@ rm -f /usr/sbin/policy-rc.d
 systemctl enable nftables ssh sddm NetworkManager duo-hw duo-watchdog duo-autobrightness duo-bootanim duo-bootanim-done \
   duo-charger duo-bt-addr duo-sensors duo-modem duo-mtp > /dev/null 2>&1
 # (the slot self-recovery is not in the source-only public release: only when its unit exists)
-[ -f /etc/systemd/system/duo-boot-check.timer ] && systemctl enable duo-boot-check.timer > /dev/null 2>&1
 # self-recovery: the slot is marked good only by duo-boot-check (45 s, healthy); qbootctl's own "mark at once" unit is
 # masked (installer.md "Self-recovery")
 [ -f /etc/systemd/system/duo-boot-check.timer ] && { systemctl mask qbootctl.service > /dev/null 2>&1 || true; }
+# this fork (CLAUDE.md rule 4): nothing may change slot state from the OS. qbootctl and gdisk are not installed above;
+# should another package pull qbootctl in, its "mark the slot good at boot" unit can still never run.
+systemctl mask qbootctl.service > /dev/null 2>&1 || true
 # ModemManager: started by duo-modem once the modem is in low-power (never straight online - the QLink crash)
 systemctl disable ModemManager > /dev/null 2>&1 || true
 # as pmOS: rmtfs + tqftpserv on; the pd-mapper daemon and qrtr-ns OFF (both are in the kernel; the daemons conflict)

@@ -375,9 +375,11 @@ fi
   for i in $(seq 1 120); do [ -n "$(part modem_a)" ] && break; sleep 0.5; done
   cp /proc/cmdline /run/duo.flags
   E=$(part esp); mkdir -p /mnt/esp1
-  if [ -n "$E" ] && mount -t vfat /dev/$E /mnt/esp1 2>/dev/null; then
+  # (this fork: the ESP is mounted READ-ONLY - a RAM boot must never write the phone. The one-shot file is therefore
+  #  not deleted, and crash logs are kept in /run/pstore instead of on the ESP.)
+  if [ -n "$E" ] && mount -t vfat -o ro /dev/$E /mnt/esp1 2>/dev/null; then
     if [ -f /mnt/esp1/duo/oneshot.flags ]; then
-      cat /mnt/esp1/duo/oneshot.flags >> /run/duo.flags; rm -f /mnt/esp1/duo/oneshot.flags; sync
+      cat /mnt/esp1/duo/oneshot.flags >> /run/duo.flags
       echo "duo-linux: one-shot flags: $(tail -1 /run/duo.flags)" > /dev/kmsg
     fi
     # Crash logs (2026-11-05): ramoops (DT ramoops@b0000000) keeps the kernel log of a HUNG boot in RAM if the reset
@@ -386,13 +388,9 @@ fi
     mkdir -p /sys/fs/pstore; mountpoint -q /sys/fs/pstore || mount -t pstore pstore /sys/fs/pstore 2>/dev/null
     if [ -n "$(ls /sys/fs/pstore 2>/dev/null)" ]; then
       # numbered, not dated: the phone's clock starts at 1970 on every boot
-      mkdir -p /mnt/esp1/duo/pstore
-      last=$(ls /mnt/esp1/duo/pstore | sed 's/-.*//' | sort -n | tail -1)
-      D=/mnt/esp1/duo/pstore/$(printf %06d $((${last:-0} + 1)))-$(cut -c1-8 /proc/sys/kernel/random/boot_id); mkdir -p $D
-      cp /sys/fs/pstore/* $D/ 2>/dev/null; sync
-      ls -d /mnt/esp1/duo/pstore/* | sort > /run/pstore.list; n=$(wc -l < /run/pstore.list)
-      [ "$n" -gt 5 ] && head -n $((n - 5)) /run/pstore.list | xargs rm -rf 2>/dev/null
-      echo "duo-linux: pstore: saved $(ls $D | wc -l) crash logs to /duo/pstore/${D##*/}" > /dev/kmsg
+      D=/run/pstore; mkdir -p $D
+      cp /sys/fs/pstore/* $D/ 2>/dev/null
+      echo "duo-linux: pstore: $(ls $D | wc -l) crash logs copied to $D (RAM only)" > /dev/kmsg
     fi
     umount /mnt/esp1
   fi
@@ -497,7 +495,7 @@ fi
     else
       [ -n "$L" ] && losetup -d $L 2>/dev/null
       # fallback: the phone's own /vendor/etc/sensors, copied to the ESP from Droidian (never in the repo)
-      mkdir -p $H/vendor/etc /mnt/esp; mount -t vfat /dev/$(part esp) /mnt/esp 2>/dev/null
+      mkdir -p $H/vendor/etc /mnt/esp; mount -t vfat -o ro /dev/$(part esp) /mnt/esp 2>/dev/null
       [ -d /mnt/esp/duo/sensors-vendor ] && cp -r /mnt/esp/duo/sensors-vendor $H/vendor/etc/sensors && \
         slog "vendor_a not mapped; using /duo/sensors-vendor copy"
       umount /mnt/esp 2>/dev/null
