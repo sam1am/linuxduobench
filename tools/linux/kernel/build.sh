@@ -22,9 +22,11 @@ rm -f /tmp/duo-series-$$.patch
 echo "series applied: $(ls $S/*.patch | wc -l) patches, HEAD $(git log -1 --format='%h %s' | cut -c1-80)"
 M="make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=$OUT"
 mkdir -p $OUT; $M defconfig duo.config > /tmp/duo-config.log 2>&1 || { tail /tmp/duo-config.log; exit 1; }
-$M -j$(nproc) Image.gz vmlinuz.efi modules qcom/sm8150-microsoft-surface-duo.dtb > /tmp/duo-build.log 2>&1 || {
+# NO_EFI=1: skip vmlinuz.efi (only the UEFI/ESP path uses it; the ABL RAM boot takes Image.gz)
+EFI=vmlinuz.efi; [ -n "${NO_EFI:-}" ] && EFI=
+$M -j$(nproc) Image.gz $EFI modules qcom/sm8150-microsoft-surface-duo.dtb > /tmp/duo-build.log 2>&1 || {
   grep -E ' error|Error [0-9]' /tmp/duo-build.log | tail -20; echo KERNEL_BUILD_FAILED; exit 1; }
 grep -E "warning:" /tmp/duo-build.log | grep -E "panel-microsoft|spi-hid-duo|venus|camss|qcom_smbx|dsi_host|qmp-combo|ufs-qcom|dp_display" | head
 echo "release $(cat $OUT/include/config/kernel.release)"
-md5sum $OUT/arch/arm64/boot/vmlinuz.efi $OUT/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo.dtb
+md5sum $OUT/arch/arm64/boot/Image.gz $OUT/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo.dtb
 echo KERNEL_BUILD_DONE

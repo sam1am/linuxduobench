@@ -1,7 +1,8 @@
 """Rewrite the RAM image's ramdisk: replace /init, drop named files, add root/.ssh/authorized_keys. Everything else
-is copied entry by entry. usage: repack.py <in.img> <new init> <key.pub> <out.img> [drop ...]"""
+is copied entry by entry. usage: repack.py <in.img> <new init> <key.pub> <out.img> [drop | path=newfile ...]"""
 import gzip, hashlib, struct, sys
-src, initf, pub, out = sys.argv[1:5]; drop = set(sys.argv[5:])
+src, initf, pub, out = sys.argv[1:5]
+drop = set(x for x in sys.argv[5:] if '=' not in x); swap = dict(x.split('=', 1) for x in sys.argv[5:] if '=' in x)
 b = open(src, 'rb').read()
 assert b[:8] == b'ANDROID!' and struct.unpack_from('<I', b, 40)[0] == 2
 ks, = struct.unpack_from('<I', b, 8); rs, = struct.unpack_from('<I', b, 16); page, = struct.unpack_from('<I', b, 36)
@@ -24,12 +25,14 @@ while True:
     if n in drop: seen.append('dropped ' + n)
     elif n == 'init':
         assert f[4] == 1; seen.append('replaced init'); new += entry(name, f[1], newinit, f[0])
+    elif n in swap:
+        seen.append('replaced ' + n); new += entry(name, f[1], open(swap[n], 'rb').read(), f[0])
     elif n.startswith('root/.ssh/authorized_keys'): seen.append('dropped old key')
     else: new += c[o:end]
     o = end
 key = open(pub, 'rb').read().strip(); assert key.startswith(b'ssh-')
 new += entry('root/.ssh/authorized_keys', 0o100600, key + b'\n', 0xfffff0) + entry('TRAILER!!!', 0)
-print(seen); assert 'replaced init' in seen and all(('dropped ' + d) in seen for d in drop)
+print(seen); assert 'replaced init' in seen and all(('dropped ' + d) in seen for d in drop) and all(('replaced ' + d) in seen for d in swap)
 R2 = gzip.compress(bytes(new), 9, mtime=0)
 sha = hashlib.sha1()
 for blob in (K, R2, b'', b'', D): sha.update(blob); sha.update(struct.pack('<I', len(blob)))

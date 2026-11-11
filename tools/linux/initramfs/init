@@ -123,17 +123,18 @@ if [ -n "$DR" ]; then
     else rlog "/dev/$P is encrypted but crypt.gz is not loaded (no cryptsetup/unl0kr)"; fi
   fi
   mkdir -p /newroot
+  # (this fork: the root is mounted as ext4 ONLY - a plain mount would let ntfs3 mount a Windows partition read-write)
   # duo.rootdir=<dir> (2026-11-08): the system lives in a DIRECTORY of the partition (e.g. Debian in /debian on sda10
   # next to other files): that directory becomes / and the whole partition stays reachable at /mnt/duo-part.
   RD=$(sed -n 's/.*duo\.rootdir=\([A-Za-z0-9_.-]*\).*/\1/p' /proc/cmdline)
   if [ -n "$P" ] && [ -n "$RD" ]; then
     mkdir -p /newpart
-    if mount -o rw /dev/$P /newpart && [ -d /newpart/$RD ] && mount --bind /newpart/$RD /newroot; then
+    if mount -t ext4 -o rw /dev/$P /newpart && [ -d /newpart/$RD ] && mount --bind /newpart/$RD /newroot; then
       mkdir -p /newroot/mnt/duo-part; mount --move /newpart /newroot/mnt/duo-part
       rlog "root = directory $RD on /dev/$P"
     else rlog "duo.rootdir=$RD: not found on /dev/$P"; umount /newpart 2>/dev/null; P=; fi
   fi
-  if [ -n "$P" ] && { [ -n "$RD" ] || mount -o rw /dev/$P /newroot; } && [ -x /newroot/sbin/init ]; then
+  if [ -n "$P" ] && { [ -n "$RD" ] || mount -t ext4 -o rw /dev/$P /newroot; } && [ -x /newroot/sbin/init ]; then
     rlog "mounted /dev/$P, switch_root to its /sbin/init"
     for m in dev proc sys; do mkdir -p /newroot/$m; mount --move /$m /newroot/$m; done
     exec switch_root /newroot /sbin/init
