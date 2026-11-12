@@ -129,6 +129,8 @@ if ! stage fork; then
 	ln -sf /usr/libexec/duo/duo-reset $R/usr/local/sbin/duo-reset
 	# developer keyboard: Esc/Tab/Ctrl/Alt/arrows row + programming symbols on long press (maliit, diverted layout)
 	ROOT=$R sh $L/debian/maliit-dev/install.sh
+	# each screen's navigation bar closes the app on its own screen
+	ROOT=$R sh $L/debian/plasma-mobile-perscreen/install.sh
 	# SSH: keys only; root for service work, `user` for the desktop
 	mkdir -p $R/root/.ssh $R/home/user/.ssh; cp "$KEYS" $R/root/.ssh/authorized_keys; cp "$KEYS" $R/home/user/.ssh/authorized_keys
 	chmod 700 $R/root/.ssh $R/home/user/.ssh; chmod 600 $R/root/.ssh/authorized_keys $R/home/user/.ssh/authorized_keys

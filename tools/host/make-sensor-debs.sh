@@ -16,6 +16,10 @@ apt-get -q update > /dev/null
 apt-get -q -y --no-install-recommends install dpkg-dev devscripts equivs gcc pkg-config libglib2.0-dev > /dev/null 2>&1
 rm -rf $B; mkdir -p $B; cd $B
 apt-get -q source libssc iio-sensor-proxy > /dev/null 2>&1
+# a claim that arrives while the sensors are still being opened (KWin, duo-posture: they wait for the proxy) never
+# started the sensor: no rotation after boot. Ours, as a local version (+duo1).
+(cd iio-sensor-proxy-* && patch -p1 < $REPO/tools/linux/sensors/iio-sensor-proxy-3.9-early-claim.patch &&
+	DEBEMAIL=duo@localhost dch --local +duo "Start sensors that were claimed while they were being opened." > /dev/null 2>&1)
 for p in libssc-* iio-sensor-proxy-*; do
 	[ -d $p ] || continue
 	(cd $p && mk-build-deps -i -r -t "apt-get -y --no-install-recommends" debian/control > ../bd-$p.log 2>&1) || { tail -15 bd-$p.log; exit 1; }

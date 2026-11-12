@@ -1,7 +1,7 @@
 {
     "KPackageStructure": "KWin/Script",
     "KPlugin": {
-        "Description": "Surface Duo: swipe from a side edge (or Meta+Shift+arrow) to move the app to the other screen",
+        "Description": "Surface Duo: move apps between the screens (top swipe towards the hinge via duo-posture, Meta+Shift+arrow)",
         "EnabledByDefault": true,
         "Icon": "preferences-system-windows",
         "Id": "duo-dualscreen",

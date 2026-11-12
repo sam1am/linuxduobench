@@ -29,7 +29,12 @@ STATE = os.path.expanduser("~/.local/state/duo-posture.json")
 KWINOUT = os.path.expanduser("~/.config/kwinoutputconfig.json")
 ROT = {"normal": "none", "bottom-up": "inverted", "left-up": "left", "right-up": "right"}
 EV = struct.Struct("llHHi")          # struct input_event on 64-bit
-EV_KEY, BTN_TOUCH = 1, 0x14a
+EV_SYN, EV_KEY, EV_ABS, BTN_TOUCH, ABS_X, ABS_Y = 0, 1, 3, 0x14a, 0, 1
+# iptsd's virtual touchscreens report the raw digitizer axes; udev gives libinput the matrix 0 -1 1 / -1 0 1, i.e.
+# on the screen (portrait, normal):  x = 1 - rawY/maxY,  y = 1 - rawX/maxX   (0..1, origin top left)
+RAW_MAX_X, RAW_MAX_Y = 9600, 7200
+# swipe along the top towards the hinge = move that screen's app to the other screen (both screens open, portrait)
+SWIPE_TOP, SWIPE_END_TOP, SWIPE_DX, SWIPE_MAX_S = 0.05, 0.20, 0.40, 2.0
 
 
 def log(*a):
@@ -49,22 +54,25 @@ class Posture:
         self.folded = False
         self.front = None            # output kept on while folded
         self.applied = None
-        self.faceup = self.load()    # output in front when folded and tilt is +1 (learned)
+        self.faceup, self.last_front = self.load()  # learned: front when folded + tilt +1; last front used
+        self.held = {LEFT: False, RIGHT: False}     # a finger is on that screen right now
+        self.picked_by, self.decided_tilt = None, 0
         self.scale = 2.55
 
     # ---------- state ----------
     def load(self):
         try:
             with open(STATE) as f:
-                v = json.load(f).get("faceup_output")
-                return v if v in (LEFT, RIGHT) else None
-        except (OSError, ValueError):
-            return None
+                d = json.load(f)
+            ok = lambda v: v if v in (LEFT, RIGHT) else None
+            return ok(d.get("faceup_output")), ok(d.get("last_front"))
+        except (OSError, ValueError, AttributeError):
+            return None, None
 
     def save(self):
         os.makedirs(os.path.dirname(STATE), exist_ok=True)
         with open(STATE + ".tmp", "w") as f:
-            json.dump({"faceup_output": self.faceup}, f)
+            json.dump({"faceup_output": self.faceup, "last_front": self.last_front}, f)
         os.replace(STATE + ".tmp", STATE)
 
     def locked(self):
@@ -133,19 +141,35 @@ class Posture:
             self.apply()
 
     def decide(self, touched=None):
-        """Folded: pick the front screen (tilt with the learned mapping, else the touched screen)."""
-        if not self.folded:
+        """Folded: pick the front screen. In order: a finger held on exactly one screen while folding (or the first
+        touch afterwards), the learned tilt mapping, the screen used last time. A screen picked by touch also teaches
+        the tilt mapping."""
+        if not self.folded or self.front is not None:
             return
-        if touched and self.front is None:
-            self.front = touched
-            if self.tilt:
-                self.faceup = touched if self.tilt > 0 else other(touched)
-                self.save()
-                log("learned: folded + face up ->", self.faceup)
+        held = [o for o, h in self.held.items() if h]
+        pick, why = None, None
+        if touched:
+            pick, why = touched, "touch"
+        elif len(held) == 1:
+            pick, why = held[0], "held"
         elif self.faceup and self.tilt:
-            self.front = self.faceup if self.tilt > 0 else other(self.faceup)
-        if self.front:
-            self.apply()
+            pick, why = (self.faceup if self.tilt > 0 else other(self.faceup)), "tilt"
+        elif self.last_front:
+            pick, why = self.last_front, "last used"
+        if not pick:
+            log("folded: no finger, no tilt, nothing learned - both screens stay on until a touch")
+            return
+        self.front, self.picked_by, self.decided_tilt = pick, why, self.tilt
+        if why in ("touch", "held") and self.tilt:
+            self.learn()
+        self.last_front = pick
+        self.save()
+        log(f"front screen {pick} ({why}; tilt {self.tilt})")
+        self.apply()
+
+    def learn(self):
+        self.faceup = self.front if self.tilt > 0 else other(self.front)
+        log("learned: folded + face up ->", self.faceup)
 
     def on_tilt(self, t):
         sign = {"face-up": 1, "tilted-up": 1, "face-down": -1, "tilted-down": -1}.get(t, 0)
@@ -153,15 +177,37 @@ class Posture:
             self.tilt, self.tilt_since = sign, time.monotonic()
 
     def tick(self):
-        # folded and turned over (tilt stable for 0.7 s): the other screen is now in front
-        if self.folded and self.faceup and self.tilt and time.monotonic() - self.tilt_since > 0.7:
-            want = self.faceup if self.tilt > 0 else other(self.faceup)
-            if want != self.front:
-                self.front = want
-                log("turned over ->", want)
-                self.apply()
-        elif self.folded and self.front is None and self.faceup and self.tilt:
-            self.decide()
+        if not self.folded:
+            return
+        if self.front is None:
+            if self.faceup and self.tilt:
+                self.decide()
+            return
+        if not self.tilt or time.monotonic() - self.tilt_since < 0.7:
+            return
+        if not self.decided_tilt:
+            # decided while vertical: this tilt belongs to the chosen screen (learn it if a finger chose it)
+            self.decided_tilt = self.tilt
+            if self.picked_by in ("touch", "held"):
+                self.learn(); self.save()
+        elif self.tilt == -self.decided_tilt:
+            # turned over (stable 0.7 s): the other screen is in front now
+            self.front = other(self.front); self.decided_tilt = self.tilt
+            self.last_front = self.front; self.save()
+            log("turned over ->", self.front)
+            self.apply()
+
+    def on_stroke(self, out, start, end, secs):
+        """A finger lifted. A swipe along the top of a screen towards the hinge sends that screen's app across."""
+        if self.folded or not self.applied or self.applied[0] != "normal" or None in self.applied[1].values():
+            return                                   # only with both screens open in portrait
+        sx, sy, _ = start; ex, ey = end
+        dx = ex - sx if out == LEFT else sx - ex     # towards the hinge: right on the left screen, left on the right
+        if sy <= SWIPE_TOP and ey <= SWIPE_END_TOP and dx >= SWIPE_DX and secs <= SWIPE_MAX_S:
+            log(f"top swipe on {out} towards the hinge ({dx:.2f}) -> move its app across")
+            subprocess.run(["busctl", "--user", "call", "org.kde.kglobalaccel", "/component/kwin",
+                            "org.kde.kglobalaccel.Component", "invokeShortcut", "s", f"DuoMoveFrom{out}"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
 
     def on_orient(self, o):
         if o in ROT:
@@ -185,6 +231,11 @@ class Posture:
         return devs
 
 
+def screen_xy(st):
+    """raw digitizer position -> (x, y) on the screen in portrait, 0..1 (see RAW_MAX_X)"""
+    return 1 - st["y"] / RAW_MAX_Y, 1 - st["x"] / RAW_MAX_X
+
+
 def spawn(cmd):
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
 
@@ -204,7 +255,7 @@ def main():
     signal.signal(signal.SIGINT, restore)
     log("touchscreens", p.touchdevs, "learned faceup", p.faceup)
     hinge = mon = None
-    touchfd = {}
+    touchfd, tstate = {}, {}
     next_spawn = 0.0
     p.apply(force=True)
     while True:
@@ -247,11 +298,26 @@ def main():
                 try:
                     data = os.read(f, EV.size * 64)
                 except OSError:
-                    os.close(f); del touchfd[f]; continue
+                    os.close(f); p.held[touchfd[f]] = False; del touchfd[f]; tstate.pop(f, None); continue
+                st = tstate.setdefault(f, {"down": False, "x": 0, "y": 0, "start": None})
+                out = touchfd[f]
                 for i in range(0, len(data) - EV.size + 1, EV.size):
                     _, _, typ, code, val = EV.unpack_from(data, i)
-                    if typ == EV_KEY and code == BTN_TOUCH and val == 1 and p.folded and p.front is None:
-                        p.decide(touched=touchfd[f])
+                    if typ == EV_ABS and code == ABS_X:
+                        st["x"] = val
+                    elif typ == EV_ABS and code == ABS_Y:
+                        st["y"] = val
+                    elif typ == EV_KEY and code == BTN_TOUCH:
+                        st["down"] = bool(val); p.held[out] = bool(val)
+                        if val:
+                            st["start"] = None          # set at the end of this frame (the position follows)
+                            if p.folded and p.front is None:
+                                p.decide(touched=out)
+                        elif st["start"]:
+                            p.on_stroke(out, st["start"], screen_xy(st), time.monotonic() - st["start"][2])
+                    elif typ == EV_SYN and st["down"] and st["start"] is None:
+                        x, y = screen_xy(st)
+                        st["start"] = (x, y, time.monotonic())
         p.tick()
 
 

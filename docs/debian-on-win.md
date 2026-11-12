@@ -107,14 +107,26 @@ Everything below is installed by `make-debian-root.sh` (sensor packages from `to
     edge on top), upside down swaps them, the 33 px hinge gap is kept. Plasma's rotation quick setting (auto-rotate
     policy "Never") locks it.
   - folded back (hinge >= 330 deg): switches the screen facing away off and disables its touchscreen in KWin, so the
-    hand on the back does nothing; apps move to the front screen. Which half faces away comes from the tilt of the
-    accelerometer's half: the first fold, a touch on the front screen teaches it (saved in
-    `~/.local/state/duo-posture.json`); after that turning the folded phone over swaps the screens. Unfolding
-    (<= 310 deg) restores both. Stopping the service restores both screens.
+    hand on the back does nothing; apps move to the front screen. Which screen stays on, in order: **the one you hold
+    a finger on while folding** (exactly one screen touched), the tilt of the accelerometer's half with the mapping
+    learned from earlier finger picks, the screen used last time; with none of these both stay on until the first
+    touch. Turning the folded phone over (tilt reversed for 0.7 s) swaps the screens. Unfolding (<= 310 deg)
+    restores both. Stopping the service restores both screens. State: `~/.local/state/duo-posture.json`.
+  - **swipe along the top of a screen towards the hinge** (start in the top 5 %, at least 40 % of the width, within
+    2 s; both screens open, portrait): that screen's app moves to the other screen.
   - log: `journalctl --user -u duo-posture`.
-- **KWin script `duo-dualscreen`** (`/usr/share/kwin/scripts/`): swipe in from a screen's right edge to send the active
-  app to the right screen, from the left edge to the left one; also Meta+Shift+Right/Left/O. Plasma Mobile shows apps
-  maximised without title bars, so there is nothing to drag; this is the replacement. (KWin's own "Window to Next
+- **KWin script `duo-dualscreen`** (`/usr/share/kwin/scripts/`): the moves behind the top swipe (`DuoMoveFromDSI-1/2`:
+  the app on top of that screen goes across), and Meta+Shift+Right/Left/O for the focused app. Plasma Mobile shows
+  apps maximised without title bars, so there is nothing to drag; this is the replacement. (Side-edge swipes, the
+  first version, felt backwards and are gone.)
+- **Navigation bar per screen** (`tools/linux/debian/plasma-mobile-perscreen/install.sh`, a diverted + patched
+  `NavigationPanelComponent.qml`): each screen's X closes the most recently used app on that screen, not the
+  focused app on either screen.
+- **Sensor proxy fix** (`tools/linux/sensors/iio-sensor-proxy-3.9-early-claim.patch`, 3.9-1+duo1): KWin and
+  duo-posture claim the accelerometer the moment the proxy appears, while it is still opening the sensors; such a
+  claim never started the sensor (orientation and tilt stayed "undefined" = no rotation), and the same race gave the
+  old `'rarray' failed` / `'sensor_device' failed` assertions and 0 lux. The proxy now starts a sensor that was
+  claimed while it was being opened. (KWin's own "Window to Next
   Screen" is refused under Plasma Mobile's `InteractiveWindowMoveEnabled=false`; the script uses
   `sendClientToScreen`, which works. Moves only complete while the screens are on: with both DPMS-off KWin renders
   nothing and apps never commit their new size.)
@@ -125,9 +137,10 @@ Everything below is installed by `make-debian-root.sh` (sensor packages from `to
   (`QKeySequence::fromString`). The package's layout is diverted (`dpkg-divert`), and a `duo` keyboard profile makes
   the keyboard 36 % of the screen height (was 30 %) so the extra row keeps the key size.
 - **duo-left-panels** (user unit, once): a status bar and navigation bar on the left screen too.
-- **Haptics:** kernel patch 0091 keeps every effect on for at least `min_play_ms` (40 ms, module parameter): a 10 ms
-  keyboard click was a start + stop that the driver collapsed into "stop" before the motor ever moved. Tune live:
-  `echo 60 > /sys/module/da7280/parameters/min_play_ms`.
+- **Haptics:** kernel patch 0091 keeps every effect on for at least `min_play_ms`: a 10 ms keyboard click was a
+  start + stop that the driver collapsed into "stop" before the motor ever moved. 0092: the clicks are also weak
+  (37 %), so any non-zero rumble plays at least `min_rumble_pct` strong; defaults 60 ms and 80 %. Tune live as root:
+  `echo 100 > /sys/module/da7280/parameters/min_play_ms`, `echo 100 > .../min_rumble_pct`.
 - **duo-reset:** resets the phone from Debian (no busybox `devmem` there): `systemd-run --on-active=3
   /usr/libexec/duo/duo-reset`.
 

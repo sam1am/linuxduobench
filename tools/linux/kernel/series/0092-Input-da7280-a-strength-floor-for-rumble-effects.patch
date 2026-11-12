@@ -1,0 +1,50 @@
+From 911a1aef94fc4de37003b62a4f675e194c1a1c0a Mon Sep 17 00:00:00 2001
+From: duo-workbench <duo@localhost>
+Date: Thu, 12 Nov 2026 03:02:04 +0000
+Subject: [PATCH] Input: da7280 - a strength floor for rumble effects
+
+Keyboard clicks arrive as weak, short rumbles (Qt's haptics effect asks
+for 37 % for 10 ms), which a pulse of the Surface Duo's LRA does not make
+noticeable even when played for the minimum time. Play any non-zero rumble
+at least min_rumble_pct strong (default 80, a module parameter; 0 turns it
+off), and raise the default minimum play time to 60 ms.
+---
+ drivers/input/misc/da7280.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/input/misc/da7280.c b/drivers/input/misc/da7280.c
+index fe3dac2c9..1bf6fd974 100644
+--- a/drivers/input/misc/da7280.c
++++ b/drivers/input/misc/da7280.c
+@@ -499,10 +499,18 @@ static void da7280_haptic_deactivate(struct da7280_haptic *haptics)
+  * work, so the stop usually overwrites the start before the work runs and the motor never moves; and an LRA needs
+  * some tens of milliseconds to be felt anyway. Keep every played effect on for at least this long.
+  */
+-static unsigned int min_play_ms = 40;
++static unsigned int min_play_ms = 60;
+ module_param(min_play_ms, uint, 0644);
+ MODULE_PARM_DESC(min_play_ms, "Minimum time an effect plays, in ms (0: off)");
+ 
++/*
++ * Keyboard clicks come as weak rumbles (Qt's haptics effect: 37 % for 10 ms), which a short pulse of this LRA does
++ * not make noticeable. Play any non-zero rumble at least this strong.
++ */
++static unsigned int min_rumble_pct = 80;
++module_param(min_rumble_pct, uint, 0644);
++MODULE_PARM_DESC(min_rumble_pct, "Minimum strength of a non-zero rumble effect, in percent (0: off)");
++
+ static void da7280_haptic_stop_work(struct work_struct *work)
+ {
+ 	struct da7280_haptic *haptics =
+@@ -558,6 +566,8 @@ static int da7280_haptics_upload_effect(struct input_dev *dev,
+ 	 */
+ 	case FF_RUMBLE:
+ 		tmp = max(effect->u.rumble.strong_magnitude, effect->u.rumble.weak_magnitude);
++		if (tmp && min_rumble_pct)
++			tmp = max_t(int, tmp, min(min_rumble_pct, 100U) * 0xFFFF / 100);
+ 		haptics->op_mode = haptics->const_op_mode;
+ 		if (haptics->op_mode == DA7280_DRO_MODE) {
+ 			haptics->level = tmp * 254 / 0xFFFF;
+-- 
+2.47.3
+
