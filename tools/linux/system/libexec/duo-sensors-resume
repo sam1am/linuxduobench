@@ -24,7 +24,12 @@ post() {
 		fi
 	fi
 	systemctl start duo-sensors
-	[ $crashed = 1 ] && systemctl restart iio-sensor-proxy
+	if [ $crashed = 1 ]; then
+		systemctl restart iio-sensor-proxy
+		# hinge readers opened before the SLPI restart stay connected but never get another reading (duo-posture
+		# then kept "180 deg" with the phone closed): end them, duo-lid and duo-posture start new ones
+		pkill -x duo-ssc-read
+	fi
 	echo "duo-sensors-resume: SLPI $(cat $R/state 2>/dev/null), sensors up (crash: $crashed)" > /dev/kmsg
 }
 # The Bluetooth UART (c8c000.serial) is a wakeup source and the WCN3998 chatters on it: every sleep ended after

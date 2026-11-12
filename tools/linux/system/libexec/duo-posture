@@ -22,7 +22,10 @@ import json, os, re, select, signal, struct, subprocess, sys, time
 
 FOLD_ON, FOLD_OFF = 330.0, 310.0     # degrees, with hysteresis
 # (closing the phone = a laptop lid: the system service duo-lid, so UPower sees one lid for the whole boot)
-GAP = 33                             # logical px between the panels (the hinge), as org.duo.HingeGap.desktop
+ROT_SETTLE = 0.7                     # s an orientation must hold before the screens rotate
+ROT_QUIET_OPEN = 1.5                 # s without rotating after the phone was opened
+ROT_MIN_ANGLE = 60.0                 # no rotating while the hinge is below this (closing, nearly closed)
+GAP = 33                            # logical px between the panels (the hinge), as org.duo.HingeGap.desktop
 SCALE_W, SCALE_H = 1350, 1800        # native portrait mode
 TOUCH = {"045E:0C02": "DSI-1", "045E:0C01": "DSI-2"}   # iptsd virtual touchscreen -> output
 TOUCH_ID = {o: k for k, o in TOUCH.items()}
@@ -65,6 +68,7 @@ class Posture:
         self.picked_by, self.decided_tilt = None, 0
         self.hb = self.hb_out = None; self.hb_dismissed = False; self.exiting = False
         self.closed = False
+        self.pending_orient, self.pending_since, self.rot_quiet_until = None, 0.0, 0.0
         self.scale = 2.55
 
     # ---------- state ----------
@@ -199,6 +203,7 @@ class Posture:
             self.closed = True
         elif a >= 25.0 and self.closed:
             self.closed = False
+            self.rot_quiet_until = time.monotonic() + ROT_QUIET_OPEN   # opening it swings through every orientation
             log(f"opened ({a:.0f} deg): waking the screens")
             # (ScreenSaver.SimulateUserActivity does not wake DPMS-off outputs here; kscreen-doctor once aborted: retry)
             for _ in range(2):
@@ -255,6 +260,7 @@ class Posture:
 
     def tick(self):
         self.hingeboard_check()
+        self.orient_tick()
         if not self.folded:
             return
         if self.front is None:
@@ -288,9 +294,22 @@ class Posture:
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
 
     def on_orient(self, o):
-        if o in ROT:
-            self.orient = o
-            self.apply()
+        # not applied at once: handling the phone (opening, picking it up, closing) passes through every orientation
+        # within a second; tick() applies one that held for ROT_SETTLE (2026-11-12: five relayouts in 3.5 s on wake)
+        if o in ROT and o != self.pending_orient:
+            self.pending_orient, self.pending_since = o, time.monotonic()
+
+    def orient_tick(self):
+        o = self.pending_orient
+        if o is None or o == self.orient:
+            return
+        now = time.monotonic()
+        if now - self.pending_since < ROT_SETTLE or now < self.rot_quiet_until:
+            return
+        if self.angle is not None and self.angle < ROT_MIN_ANGLE:
+            return                              # closing / nearly closed: the screens are not being looked at
+        self.orient = o
+        self.apply()
 
     # ---------- inputs ----------
     def find_touch(self):
