@@ -57,7 +57,10 @@ fi
 # NO system suspend (2026-11-08): Plasma's PowerDevil suspended the phone on idle (s2idle) - USB to the PC dropped and
 # the watchdog pauses in suspend, so it looked exactly like a freeze (the "01:58 freeze" was this; nothing woke it).
 # pmOS sleeps only through our duo-sleep; on Debian the sleep targets are masked until that is ported.
-for t in sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target; do
+# (Fork, 2026-11-12: s2idle works on this kernel - UFS at the kernel's spm_lvl 3 survives, the SLPI is handled by
+#  duo-sensors-resume - so suspend itself is allowed again; idle suspend stays off in /etc/xdg/powerdevilrc
+#  (AutoSuspendAction=0). Hibernation stays masked: no swap.)
+for t in hibernate.target hybrid-sleep.target suspend-then-hibernate.target; do
   ln -sf /dev/null /etc/systemd/system/$t; done
 # and no lock screen: the auto-login user has no password (no PIN to remember on a single-user phone)
 mkdir -p /home/user/.config

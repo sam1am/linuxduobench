@@ -1,0 +1,35 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo: the sensor DSP (SLPI) across a suspend. A systemd-sleep hook (/usr/lib/systemd/system-sleep/duo-sensors,
+# called with pre|post <type>); by hand: duo-sensors-resume now (= the post-resume recovery).
+# Found 2026-11-12 (first s2idle on this kernel): during s2idle every user process is frozen, including hexagonrpcd,
+# which serves the SLPI's file requests (sensor registry writes, all the time); with no answer for ~16 s its
+# sensor_process takes a fatal error ("err_qdi.c ... sensor_process ... frpc_dsp") and, recovery being off
+# (duo-sensors), the hinge / accelerometer / light sensors are gone until a reboot.
+#  pre : stop duo-sensors = stop hexagonrpcd only (the SLPI keeps running without it, just without file access -
+#        docs/drivers/sensors.md; Debian's own hexagonrpcd-suspend/-resume units do the same on SDM670)
+#  post: if the SLPI crashed anyway: one recovery; then start duo-sensors again (+ iio-sensor-proxy after a crash).
+#        In the background, so resume is not held up. duo-lid and duo-posture re-open their hinge readers themselves.
+slpi() { for r in /sys/class/remoteproc/remoteproc*; do [ "$(cat $r/name 2>/dev/null)" = slpi ] && echo $r; done; }
+post() {
+	R=$(slpi); crashed=0
+	if [ -n "$R" ]; then
+		for i in 1 2 3 4 5 6; do [ "$(cat $R/state)" = crashed ] && break; sleep 0.5; done   # it shows just after resume
+		if [ "$(cat $R/state)" = crashed ]; then
+			crashed=1
+			echo "duo-sensors-resume: SLPI crashed during suspend, recovering" > /dev/kmsg
+			systemctl stop duo-sensors
+			echo recover > $R/recovery
+			for i in $(seq 1 20); do [ "$(cat $R/state)" = running ] && break; sleep 0.5; done
+		fi
+	fi
+	systemctl start duo-sensors
+	[ $crashed = 1 ] && systemctl restart iio-sensor-proxy
+	echo "duo-sensors-resume: SLPI $(cat $R/state 2>/dev/null), sensors up (crash: $crashed)" > /dev/kmsg
+}
+case "$1" in
+pre) systemctl stop duo-sensors ;;
+post) (post > /dev/null 2>&1 &) ;;
+now) post ;;
+esac
+exit 0

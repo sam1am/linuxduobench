@@ -1,14 +1,18 @@
 # Surface Duo defaults (users can change them in Settings > Power): closing the phone turns the screens off.
 # LidAction 64 = turn off screen; the second screen counts as an "external monitor", which must not inhibit it.
+# AutoSuspendAction 0: never suspend on idle (USB to the PC drops and nothing may wake it: the 2026-11-08 "freeze").
 [AC][SuspendAndShutdown]
 LidAction=64
 InhibitLidActionWhenExternalMonitorPresent=false
+AutoSuspendAction=0
 
 [Battery][SuspendAndShutdown]
 LidAction=64
 InhibitLidActionWhenExternalMonitorPresent=false
+AutoSuspendAction=0
 
 [LowBattery][SuspendAndShutdown]
 LidAction=64
 InhibitLidActionWhenExternalMonitorPresent=false
+AutoSuspendAction=0
 

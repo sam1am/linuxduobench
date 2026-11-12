@@ -134,6 +134,9 @@ if ! stage fork; then
 	# closing the phone = a laptop lid (duo-lid, enabled by install.sh): Plasma turns the screens off, logind ignores it
 	install -D -m644 $L/debian/50-duo-lid.conf $R/etc/systemd/logind.conf.d/50-duo-lid.conf
 	install -D -m644 $L/debian/powerdevilrc $R/etc/xdg/powerdevilrc
+	# s2idle: hexagonrpcd stopped before, the SLPI recovered (if needed) and the sensors restarted after
+	mkdir -p $R/usr/lib/systemd/system-sleep
+	ln -sf /usr/libexec/duo/duo-sensors-resume $R/usr/lib/systemd/system-sleep/duo-sensors
 	# hingeboard (tools/linux/hingeboard): the laptop keyboard on the lower screen when the screens are stacked
 	chroot $R apt-get -q -y --no-install-recommends install python3-gi python3-gi-cairo python3-cairo python3-evdev \
 		gir1.2-gtk-4.0 gir1.2-gtk4layershell-1.0 libgtk4-layer-shell0 > /dev/null 2>&1 || { echo "hingeboard packages failed"; exit 1; }

@@ -119,9 +119,14 @@ Everything below is installed by `make-debian-root.sh` (sensor packages from `to
   `SW_LID`; closed at <= 10 deg, open at >= 25). UPower sees it as a laptop lid, so Plasma's "When laptop lid closed"
   setting applies: the default here (`/etc/xdg/powerdevilrc`) is *turn off screen*, with "inhibit when an external
   monitor is present" off (Plasma counts the second screen as external). Opening wakes both screens (duo-posture).
-  logind ignores the lid (`/etc/systemd/logind.conf.d/50-duo-lid.conf`). **Not yet: sleep (s2idle) on close** - the
-  suspend tests (2026-11-04) needed UFS at `spm_lvl` 5 and were done before UFS power saving was switched on; the
-  current `spm_lvl` 3 is untested, and a UFS that does not come back takes the root file system with it.
+  logind ignores the lid (`/etc/systemd/logind.conf.d/50-duo-lid.conf`).
+- **Suspend (s2idle), tested 2026-11-12:** works with UFS at the kernel's `spm_lvl` 3 (64 MB write + read-back
+  after resume OK; Wi-Fi reconnects). The SLPI's sensor process crashed when hexagonrpcd was frozen during the sleep,
+  so the systemd-sleep hook `duo-sensors-resume` stops hexagonrpcd before (no crash then) and recovers the SLPI after
+  if it crashed anyway. Wakes: the power key, the touchscreen (spi0.0), the RTC. **Opening the phone does not wake it
+  yet:** the hinge sensor's reports arrive over the SLPI's glink channel, whose interrupt does not count as a wakeup
+  in s2idle (a kernel change; every other sensor stream would then have to stop before sleep). Idle suspend is off
+  (`AutoSuspendAction=0`: the 2026-11-08 "freeze" was Plasma idle-suspending with nothing to wake it).
   Test hooks: `systemctl kill --kill-whom=main -s USR1 duo-lid` = closed for 10 s, `USR2` = open.
 - **Laptop keyboard when stacked** ([hingeboard](https://github.com/brysonwf/hingeboard), vendored in
   `tools/linux/hingeboard/`): with the phone rotated so the screens are one above the other, duo-posture runs
