@@ -115,6 +115,12 @@ Everything below is installed by `make-debian-root.sh` (sensor packages from `to
   - **swipe along the top of a screen towards the hinge** (start in the top 5 %, at least 40 % of the width, within
     2 s; both screens open, portrait): that screen's app moves to the other screen.
   - log: `journalctl --user -u duo-posture`.
+- **Laptop keyboard when stacked** ([hingeboard](https://github.com/brysonwf/hingeboard), vendored in
+  `tools/linux/hingeboard/`): with the phone rotated so the screens are one above the other, duo-posture runs
+  hingeboard on the **lower** screen (apps on the lower screen move up first) and switches maliit off, so typing on
+  the upper screen never opens a keyboard over it. Back to portrait (or folded) = hingeboard stops, maliit returns.
+  Its Exit key closes it until the next time the screens are stacked; never: `touch
+  ~/.config/duo-posture-no-hingeboard`.
 - **KWin script `duo-dualscreen`** (`/usr/share/kwin/scripts/`): the moves behind the top swipe (`DuoMoveFromDSI-1/2`:
   the app on top of that screen goes across), and Meta+Shift+Right/Left/O for the focused app. Plasma Mobile shows
   apps maximised without title bars, so there is nothing to drag; this is the replacement. (Side-edge swipes, the

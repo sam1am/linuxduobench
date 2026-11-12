@@ -131,6 +131,12 @@ if ! stage fork; then
 	ROOT=$R sh $L/debian/maliit-dev/install.sh
 	# each screen's navigation bar closes the app on its own screen
 	ROOT=$R sh $L/debian/plasma-mobile-perscreen/install.sh
+	# hingeboard (tools/linux/hingeboard): the laptop keyboard on the lower screen when the screens are stacked
+	chroot $R apt-get -q -y --no-install-recommends install python3-gi python3-gi-cairo python3-cairo python3-evdev \
+		gir1.2-gtk-4.0 gir1.2-gtk4layershell-1.0 libgtk4-layer-shell0 > /dev/null 2>&1 || { echo "hingeboard packages failed"; exit 1; }
+	for f in hingeboard hingeboard-dictate.py; do install -m755 $L/hingeboard/$f $R/usr/local/bin/$f; done
+	echo 'KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
+		> $R/etc/udev/rules.d/70-hingeboard-uinput.rules
 	# SSH: keys only; root for service work, `user` for the desktop
 	mkdir -p $R/root/.ssh $R/home/user/.ssh; cp "$KEYS" $R/root/.ssh/authorized_keys; cp "$KEYS" $R/home/user/.ssh/authorized_keys
 	chmod 700 $R/root/.ssh $R/home/user/.ssh; chmod 600 $R/root/.ssh/authorized_keys $R/home/user/.ssh/authorized_keys

@@ -31,8 +31,8 @@ function send(w, from, to) {
 }
 
 // apps only: not KWin's own internal windows (the outline, OSDs: resourceClass kwin_wayland), not panels or popups
-function movable(w) {
-    return w && w.normalWindow && !w.specialWindow && !w.minimized && !w.skipTaskbar &&
+function movable(w, evenMinimized) {
+    return w && w.normalWindow && !w.specialWindow && (evenMinimized || !w.minimized) && !w.skipTaskbar &&
         w.resourceClass !== "kwin_wayland";
 }
 
@@ -59,9 +59,26 @@ function moveFrom(name) {
     print("duo-dualscreen: no app on " + name);
 }
 
+// every app on that screen to the other one (duo-posture: before hingeboard covers the lower screen)
+function moveAllFrom(name) {
+    var s = screensInOrder(), from = null, to = null;
+    for (var k = 0; k < s.length; k++) { if (s[k].name === name) from = s[k]; else if (!to) to = s[k]; }
+    if (!from || !to) return;
+    var ws = workspace.stackingOrder.slice();
+    // minimised ones too: restored later they would open under the keyboard
+    for (var i = 0; i < ws.length; i++) {
+        var w = ws[i];
+        if (!movable(w, true) || w.output !== from) continue;
+        if (w.minimized) { workspace.sendClientToScreen(w, to); print("duo-dualscreen: " + w.resourceClass + " (minimised) " + from.name + " -> " + to.name); }
+        else send(w, from, to);
+    }
+}
+
 registerShortcut("DuoMoveRight", "Duo: move app to the next screen", "Meta+Shift+Right", function () { move(+1); });
 registerShortcut("DuoMoveLeft", "Duo: move app to the previous screen", "Meta+Shift+Left", function () { move(-1); });
 registerShortcut("DuoMoveOther", "Duo: move app to the other screen", "Meta+Shift+O", function () { move(0); });
 registerShortcut("DuoMoveFromDSI-1", "Duo: move the left screen's app to the right screen", "", function () { moveFrom("DSI-1"); });
 registerShortcut("DuoMoveFromDSI-2", "Duo: move the right screen's app to the left screen", "", function () { moveFrom("DSI-2"); });
+registerShortcut("DuoMoveAllFromDSI-1", "Duo: move every app on the left screen to the right one", "", function () { moveAllFrom("DSI-1"); });
+registerShortcut("DuoMoveAllFromDSI-2", "Duo: move every app on the right screen to the left one", "", function () { moveAllFrom("DSI-2"); });
 print("duo-dualscreen: loaded, " + workspace.screens.length + " screens");

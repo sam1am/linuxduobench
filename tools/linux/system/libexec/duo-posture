@@ -24,6 +24,11 @@ FOLD_ON, FOLD_OFF = 330.0, 310.0     # degrees, with hysteresis
 GAP = 33                             # logical px between the panels (the hinge), as org.duo.HingeGap.desktop
 SCALE_W, SCALE_H = 1350, 1800        # native portrait mode
 TOUCH = {"045E:0C02": "DSI-1", "045E:0C01": "DSI-2"}   # iptsd virtual touchscreen -> output
+TOUCH_ID = {o: k for k, o in TOUCH.items()}
+# screens stacked (landscape): hingeboard (github.com/brysonwf/hingeboard, tools/linux/hingeboard) is the keyboard on
+# the lower screen, maliit is off. Off for good: touch ~/.config/duo-posture-no-hingeboard
+HINGEBOARD = next((p for p in ("/usr/local/bin/hingeboard",) if os.access(p, os.X_OK)), None)
+NO_HINGEBOARD = os.path.expanduser("~/.config/duo-posture-no-hingeboard")
 LEFT, RIGHT = "DSI-1", "DSI-2"
 STATE = os.path.expanduser("~/.local/state/duo-posture.json")
 KWINOUT = os.path.expanduser("~/.config/kwinoutputconfig.json")
@@ -57,6 +62,7 @@ class Posture:
         self.faceup, self.last_front = self.load()  # learned: front when folded + tilt +1; last front used
         self.held = {LEFT: False, RIGHT: False}     # a finger is on that screen right now
         self.picked_by, self.decided_tilt = None, 0
+        self.hb = self.hb_out = None; self.hb_dismissed = False; self.exiting = False
         self.scale = 2.55
 
     # ---------- state ----------
@@ -118,6 +124,62 @@ class Posture:
             self.touch_enable(o, pos[o] is not None)
         self.applied = want
         log("layout", rot, {o: p for o, p in pos.items()}, "angle", self.angle)
+        self.hingeboard_update()
+
+    # ---------- laptop keyboard (hingeboard) ----------
+    def stacked_lower(self):
+        """the lower screen when the screens are stacked (landscape, both on, not folded), else None"""
+        if self.folded or not self.applied:
+            return None
+        rot, pos = self.applied
+        if rot not in ("left-up", "right-up") or None in pos.values():
+            return None
+        return max(pos, key=lambda o: pos[o][1])
+
+    def hingeboard_update(self):
+        lower = self.stacked_lower()
+        if self.hb and (lower is None or self.hb_out != lower):
+            self.hingeboard_stop()
+        if lower is None:
+            self.hb_dismissed = False             # Exit on the keyboard holds until the screens are stacked again
+            return
+        if self.hb or self.hb_dismissed or self.exiting or not HINGEBOARD or os.path.exists(NO_HINGEBOARD):
+            return
+        upper = other(lower)
+        # apps on the lower screen would be hidden under the keyboard: move them up first
+        subprocess.run(["busctl", "--user", "call", "org.kde.kglobalaccel", "/component/kwin",
+                        "org.kde.kglobalaccel.Component", "invokeShortcut", "s", f"DuoMoveAllFrom{lower}"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        self.vkbd(False)                          # maliit off: hingeboard is the keyboard now
+        env = dict(os.environ, HINGEBOARD_OUTPUT=lower, HINGEBOARD_OTHER=upper,
+                   HINGEBOARD_OTHER_TOUCH=TOUCH_ID[upper], HINGEBOARD_ROTATE="0", GTK_A11Y="none")
+        self.hb = subprocess.Popen([HINGEBOARD], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.hb_out = lower
+        log(f"stacked: laptop keyboard on {lower} (apps on {upper})")
+
+    def hingeboard_stop(self):
+        if self.hb:
+            self.hb.terminate()
+            try:
+                self.hb.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.hb.kill()
+            log("laptop keyboard off")
+        self.hb = self.hb_out = None
+        self.vkbd(True)
+
+    def hingeboard_check(self):
+        """the keyboard's own Exit: leave it off (maliit back) until the screens are stacked again"""
+        if self.hb and self.hb.poll() is not None:
+            self.hb = self.hb_out = None
+            self.hb_dismissed = True
+            self.vkbd(True)
+            log("laptop keyboard closed from its Exit key")
+
+    def vkbd(self, on):
+        subprocess.run(["busctl", "--user", "set-property", "org.kde.KWin", "/VirtualKeyboard",
+                        "org.kde.kwin.VirtualKeyboard", "enabled", "b", "true" if on else "false"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
 
     def touch_enable(self, out, on):
         for dev, o in self.touchdevs.items():
@@ -177,6 +239,7 @@ class Posture:
             self.tilt, self.tilt_since = sign, time.monotonic()
 
     def tick(self):
+        self.hingeboard_check()
         if not self.folded:
             return
         if self.front is None:
@@ -246,8 +309,9 @@ def main():
 
     def restore(*_):
         # never leave a screen switched off behind us
-        p.folded = False; p.front = None
+        p.folded = False; p.front = None; p.exiting = True
         try:
+            p.hingeboard_stop()
             p.apply(force=True)
         finally:
             sys.exit(0)
