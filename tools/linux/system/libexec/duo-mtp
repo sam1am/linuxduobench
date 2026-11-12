@@ -8,7 +8,7 @@ DUO_NAME=duo-mtp; . /usr/libexec/duo/duo-lib.sh
 case "$1" in
 start)
 	command -v umtprd > /dev/null || [ -x /usr/local/sbin/umtprd ] || { log "no umtprd"; exit 1; }
-	mkdir -p /home/user/Downloads /home/user/Pictures
+	install -d -o 10000 -g 10000 /home/user/Downloads /home/user/Pictures   # owned by the user, not root
 	setsid sh /usr/libexec/duo/duo-mtp-gadget > /var/log/duo-mtp.log 2>&1 < /dev/null &
 	log "MTP share starting" ;;
 stop)
