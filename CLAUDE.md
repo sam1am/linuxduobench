@@ -67,7 +67,11 @@ Details: `docs/brick-record.md`, `docs/bootloader-facts.md`.
 
 ## Operating rules on the running Linux
 
-- Reset only with `devmem 0x0c264000 w 0`; `reboot` hangs this phone.
+- Reset only with `devmem 0x0c264000 w 0` (RAM shell) or `duo-reset` (installed Debian, which has no busybox
+  devmem; the same 32-bit PS_HOLD write); `reboot` hangs this phone. Over SSH on Debian, run a delayed reset as
+  `systemd-run --on-active=3 /usr/libexec/duo/duo-reset`: sshd kills a backgrounded `sleep; devmem` with the session.
+- Never `rmmod`/`insmod` the `da7280` haptics module at runtime (the swap oopses and freezes the SoC); replace the
+  file on disk and reboot.
 - Never read display registers (`0x0ae0xxxx`) with the display off; never touch the apps SMMU (`0x15000000`).
 - Before charger or battery work read `/sys/class/power_supply/bq27742-*/temp`; stop outside 15-35 °C.
 - Never toggle UFS power-management sysfs knobs at runtime.

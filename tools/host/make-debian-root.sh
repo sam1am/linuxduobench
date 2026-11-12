@@ -109,6 +109,24 @@ if ! stage fork; then
 	# touch daemon (not packaged in Debian): built by make-iptsd.sh into /root/iptsd-out
 	if [ -x /root/iptsd-out/iptsd ]; then mkdir -p $R/opt/duo/bin; cp /root/iptsd-out/iptsd* $R/opt/duo/bin/; echo "iptsd: installed"
 	else echo "WARNING: no /root/iptsd-out/iptsd - touch will not work until it is added"; fi
+	# sensors (make-sensor-debs.sh): libssc + iio-sensor-proxy with SSC support (held: trixie's own has none) and the
+	# hinge/posture reader; then the two-screen layer: duo-posture (user unit) and the KWin dual-screen script
+	S=/root/sensor-debs
+	if [ -f $S/duo-ssc-read ] && ls $S/libssc2_*.deb > /dev/null 2>&1; then
+		mkdir -p $R/tmp/sd; cp $S/*.deb $R/tmp/sd/
+		chroot $R sh -c 'apt-get -q update > /dev/null && apt-get -q -y --no-install-recommends install /tmp/sd/*.deb > /dev/null 2>&1 &&
+			apt-mark hold libssc2 libssc-bin iio-sensor-proxy > /dev/null' || { echo "sensor packages failed"; exit 1; }
+		install -m755 $S/duo-ssc-read $R/usr/local/bin/duo-ssc-read; echo "sensors: libssc + iio-sensor-proxy (SSC) + duo-ssc-read"
+	else echo "WARNING: no $S (make-sensor-debs.sh) - no rotation, hinge or light sensor on the desktop"; fi
+	for u in duo-posture duo-left-panels; do
+		install -D -m644 $L/debian/$u.service $R/usr/lib/systemd/user/$u.service
+		chroot $R systemctl --global enable $u.service > /dev/null 2>&1
+	done
+	rm -rf $R/usr/share/kwin/scripts/duo-dualscreen; mkdir -p $R/usr/share/kwin/scripts
+	cp -r $L/debian/kwin-duo-dualscreen $R/usr/share/kwin/scripts/duo-dualscreen
+	find $R/usr/share/kwin/scripts/duo-dualscreen -name '._*' -delete
+	printf '[Plugins]\nduo-dualscreenEnabled=true\n' > $R/etc/xdg/kwinrc
+	ln -sf /usr/libexec/duo/duo-reset $R/usr/local/sbin/duo-reset
 	# SSH: keys only; root for service work, `user` for the desktop
 	mkdir -p $R/root/.ssh $R/home/user/.ssh; cp "$KEYS" $R/root/.ssh/authorized_keys; cp "$KEYS" $R/home/user/.ssh/authorized_keys
 	chmod 700 $R/root/.ssh $R/home/user/.ssh; chmod 600 $R/root/.ssh/authorized_keys $R/home/user/.ssh/authorized_keys

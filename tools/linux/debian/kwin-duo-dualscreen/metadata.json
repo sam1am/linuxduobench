@@ -1,0 +1,14 @@
+{
+    "KPackageStructure": "KWin/Script",
+    "KPlugin": {
+        "Description": "Surface Duo: swipe from a side edge (or Meta+Shift+arrow) to move the app to the other screen",
+        "EnabledByDefault": true,
+        "Icon": "preferences-system-windows",
+        "Id": "duo-dualscreen",
+        "License": "GPL-2.0-or-later",
+        "Name": "Duo dual screen",
+        "Version": "1.0"
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
+}

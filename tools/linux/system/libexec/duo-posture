@@ -1,0 +1,259 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""duo-posture: the Surface Duo's two-screen layout on Plasma (KWin), driven by its sensors.
+
+Runs in the desktop session (systemd user unit duo-posture.service) as the desktop user. Inputs:
+  - hinge angle: `duo-ssc-read hinge_angle` (Microsoft's SSC sensor: 0 closed, 180 flat, ~355 folded back to back)
+  - orientation + tilt: `monitor-sensor --accel` (iio-sensor-proxy with libssc)
+  - touches: the two iptsd virtual touchscreens (0C02 = left = DSI-1, 0C01 = right = DSI-2), read-only
+Outputs: `kscreen-doctor` (rotation, position, enable/disable) and KWin's InputDevice D-Bus "enabled" property.
+
+  - Both screens open: rotate both together; landscape stacks them (the screen on the upper edge on top), upside down
+    swaps them; the hinge gap is kept. The rotation lock (Plasma's quick setting = KWin's auto-rotate policy
+    "Never") is respected.
+  - Folded back (hinge >= FOLD_ON): the screen facing away is switched off and its touchscreen ignored, so the hand on
+    the back does nothing. Which screen faces away comes from the tilt of the accelerometer's half: the first time,
+    the first touch while folded says which screen is in front, and that is remembered (STATE file); after that the
+    tilt alone decides, and turning the folded phone over swaps the screens. Unfolding (hinge <= FOLD_OFF) restores
+    both.
+Nothing here writes to the phone's storage except the small state file in the user's home.
+"""
+import json, os, re, select, signal, struct, subprocess, sys, time
+
+FOLD_ON, FOLD_OFF = 330.0, 310.0     # degrees, with hysteresis
+GAP = 33                             # logical px between the panels (the hinge), as org.duo.HingeGap.desktop
+SCALE_W, SCALE_H = 1350, 1800        # native portrait mode
+TOUCH = {"045E:0C02": "DSI-1", "045E:0C01": "DSI-2"}   # iptsd virtual touchscreen -> output
+LEFT, RIGHT = "DSI-1", "DSI-2"
+STATE = os.path.expanduser("~/.local/state/duo-posture.json")
+KWINOUT = os.path.expanduser("~/.config/kwinoutputconfig.json")
+ROT = {"normal": "none", "bottom-up": "inverted", "left-up": "left", "right-up": "right"}
+EV = struct.Struct("llHHi")          # struct input_event on 64-bit
+EV_KEY, BTN_TOUCH = 1, 0x14a
+
+
+def log(*a):
+    print("duo-posture:", *a, flush=True)
+
+
+def other(o):
+    return RIGHT if o == LEFT else LEFT
+
+
+class Posture:
+    def __init__(self):
+        self.angle = None
+        self.orient = "normal"
+        self.tilt = 0                # +1 accelerometer half faces up, -1 down, 0 vertical/unknown
+        self.tilt_since = 0.0
+        self.folded = False
+        self.front = None            # output kept on while folded
+        self.applied = None
+        self.faceup = self.load()    # output in front when folded and tilt is +1 (learned)
+        self.scale = 2.55
+
+    # ---------- state ----------
+    def load(self):
+        try:
+            with open(STATE) as f:
+                v = json.load(f).get("faceup_output")
+                return v if v in (LEFT, RIGHT) else None
+        except (OSError, ValueError):
+            return None
+
+    def save(self):
+        os.makedirs(os.path.dirname(STATE), exist_ok=True)
+        with open(STATE + ".tmp", "w") as f:
+            json.dump({"faceup_output": self.faceup}, f)
+        os.replace(STATE + ".tmp", STATE)
+
+    def locked(self):
+        """Plasma's rotation quick setting off = KWin auto-rotate policy Never on the outputs."""
+        try:
+            with open(KWINOUT) as f:
+                for sec in json.load(f):
+                    if sec.get("name") == "outputs":
+                        return any(o.get("autoRotation") == "Never" for o in sec["data"])
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        return False
+
+    # ---------- layout ----------
+    def layout(self):
+        rot = self.orient if not self.locked() else (self.applied[0] if self.applied else "normal")
+        w = -(-SCALE_W * 100 // round(self.scale * 100))   # logical width, rounded up as KWin does (530)
+        if self.folded and self.front:
+            return (rot, {self.front: (0, 0), other(self.front): None})
+        if rot == "normal":      pos = {LEFT: (0, 0), RIGHT: (w + GAP, 0)}
+        elif rot == "bottom-up": pos = {RIGHT: (0, 0), LEFT: (w + GAP, 0)}
+        elif rot == "left-up":   pos = {LEFT: (0, 0), RIGHT: (0, w + GAP)}
+        else:                    pos = {RIGHT: (0, 0), LEFT: (0, w + GAP)}
+        return (rot, pos)
+
+    def apply(self, force=False):
+        want = self.layout()
+        if want == self.applied and not force:
+            return
+        rot, pos = want
+        args = ["kscreen-doctor"]
+        for o in (LEFT, RIGHT):          # enable first, then disable: never zero outputs at once
+            if pos[o] is not None:
+                args += [f"output.{o}.enable", f"output.{o}.rotation.{ROT[rot]}", f"output.{o}.position.{pos[o][0]},{pos[o][1]}"]
+        for o in (LEFT, RIGHT):
+            if pos[o] is None:
+                args += [f"output.{o}.disable"]
+        r = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=10)
+        if r.returncode:
+            log("kscreen-doctor failed:", r.stderr.strip()[:200])
+            return
+        for o in (LEFT, RIGHT):
+            self.touch_enable(o, pos[o] is not None)
+        self.applied = want
+        log("layout", rot, {o: p for o, p in pos.items()}, "angle", self.angle)
+
+    def touch_enable(self, out, on):
+        for dev, o in self.touchdevs.items():
+            if o == out:
+                subprocess.run(["busctl", "--user", "set-property", "org.kde.KWin", f"/org/kde/KWin/InputDevice/{dev}",
+                                "org.kde.KWin.InputDevice", "enabled", "b", "true" if on else "false"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+
+    # ---------- decisions ----------
+    def on_angle(self, a):
+        self.angle = a
+        if not self.folded and a >= FOLD_ON:
+            self.folded = True
+            self.front = None
+            log(f"folded back ({a:.0f} deg)")
+            self.decide()
+        elif self.folded and a <= FOLD_OFF:
+            self.folded = False
+            self.front = None
+            log(f"unfolded ({a:.0f} deg)")
+            self.apply()
+
+    def decide(self, touched=None):
+        """Folded: pick the front screen (tilt with the learned mapping, else the touched screen)."""
+        if not self.folded:
+            return
+        if touched and self.front is None:
+            self.front = touched
+            if self.tilt:
+                self.faceup = touched if self.tilt > 0 else other(touched)
+                self.save()
+                log("learned: folded + face up ->", self.faceup)
+        elif self.faceup and self.tilt:
+            self.front = self.faceup if self.tilt > 0 else other(self.faceup)
+        if self.front:
+            self.apply()
+
+    def on_tilt(self, t):
+        sign = {"face-up": 1, "tilted-up": 1, "face-down": -1, "tilted-down": -1}.get(t, 0)
+        if sign != self.tilt:
+            self.tilt, self.tilt_since = sign, time.monotonic()
+
+    def tick(self):
+        # folded and turned over (tilt stable for 0.7 s): the other screen is now in front
+        if self.folded and self.faceup and self.tilt and time.monotonic() - self.tilt_since > 0.7:
+            want = self.faceup if self.tilt > 0 else other(self.faceup)
+            if want != self.front:
+                self.front = want
+                log("turned over ->", want)
+                self.apply()
+        elif self.folded and self.front is None and self.faceup and self.tilt:
+            self.decide()
+
+    def on_orient(self, o):
+        if o in ROT:
+            self.orient = o
+            self.apply()
+
+    # ---------- inputs ----------
+    def find_touch(self):
+        devs = {}
+        for e in os.listdir("/sys/class/input"):
+            if not e.startswith("event"):
+                continue
+            try:
+                with open(f"/sys/class/input/{e}/device/name") as f:
+                    n = f.read().strip()
+            except OSError:
+                continue
+            for k, o in TOUCH.items():
+                if n == f"IPTSD Virtual Touchscreen {k}":
+                    devs[e] = o
+        return devs
+
+
+def spawn(cmd):
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+
+
+def main():
+    p = Posture()
+    p.touchdevs = p.find_touch()
+
+    def restore(*_):
+        # never leave a screen switched off behind us
+        p.folded = False; p.front = None
+        try:
+            p.apply(force=True)
+        finally:
+            sys.exit(0)
+    signal.signal(signal.SIGTERM, restore)
+    signal.signal(signal.SIGINT, restore)
+    log("touchscreens", p.touchdevs, "learned faceup", p.faceup)
+    hinge = mon = None
+    touchfd = {}
+    next_spawn = 0.0
+    p.apply(force=True)
+    while True:
+        now = time.monotonic()
+        if now >= next_spawn:
+            if hinge is None or hinge.poll() is not None:
+                hinge = spawn(["duo-ssc-read", "hinge_angle"])
+            if mon is None or mon.poll() is not None:
+                mon = spawn(["stdbuf", "-oL", "monitor-sensor", "--accel"])   # line-buffered through the pipe
+            if len(touchfd) < 2:
+                p.touchdevs = p.find_touch()
+                for dev, o in p.touchdevs.items():
+                    if o not in touchfd.values():
+                        try:
+                            touchfd[os.open(f"/dev/input/{dev}", os.O_RDONLY | os.O_NONBLOCK)] = o
+                        except OSError:
+                            pass
+            next_spawn = now + 5
+        fds = [hinge.stdout, mon.stdout] + list(touchfd)
+        r, _, _ = select.select(fds, [], [], 0.3)
+        for f in r:
+            if f is hinge.stdout:
+                line = f.readline()
+                if not line:
+                    hinge.wait(); continue
+                v = line.split()
+                if len(v) >= 2 and v[0] == "hinge_angle":
+                    p.on_angle(float(v[1]))
+            elif f is mon.stdout:
+                line = f.readline()
+                if not line:
+                    mon.wait(); continue
+                m = re.search(r"orientation(?: changed)?: ([a-z-]+)", line)
+                if m:
+                    p.on_orient(m.group(1))
+                m = re.search(r"[Tt]ilt(?: changed)?: ([a-z-]+)", line)
+                if m:
+                    p.on_tilt(m.group(1))
+            else:
+                try:
+                    data = os.read(f, EV.size * 64)
+                except OSError:
+                    os.close(f); del touchfd[f]; continue
+                for i in range(0, len(data) - EV.size + 1, EV.size):
+                    _, _, typ, code, val = EV.unpack_from(data, i)
+                    if typ == EV_KEY and code == BTN_TOUCH and val == 1 and p.folded and p.front is None:
+                        p.decide(touched=touchfd[f])
+        p.tick()
+
+
+if __name__ == "__main__":
+    main()

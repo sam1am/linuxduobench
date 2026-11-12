@@ -1,0 +1,22 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Reset the Surface Duo from a running Linux: the same 32-bit write of 0 to PS_HOLD (0x0c264000) as
+# `devmem 0x0c264000 w 0` in the RAM shell (CLAUDE.md: `reboot` hangs this phone). Debian has no busybox devmem.
+# The phone then cold-boots (into Android when it is not booted tethered again). Writes nothing to storage; run `sync`
+# first. usage (root): duo-reset [delay seconds]   - with a delay it detaches, so it survives the SSH session ending.
+import mmap, os, struct, sys, time
+
+PS_HOLD = 0x0c264000
+delay = float(sys.argv[1]) if len(sys.argv) > 1 else 0
+if delay and os.fork():
+    sys.exit(0)
+if delay:
+    os.setsid()
+    time.sleep(delay)
+os.sync()
+fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+page = PS_HOLD & ~(mmap.PAGESIZE - 1)
+m = mmap.mmap(fd, mmap.PAGESIZE, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=page)
+memoryview(m).cast("I")[(PS_HOLD - page) // 4] = 0     # one aligned 32-bit store
+time.sleep(5)
+print("duo-reset: still running?", file=sys.stderr)

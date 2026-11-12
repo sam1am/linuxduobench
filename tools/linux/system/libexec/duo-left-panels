@@ -1,0 +1,26 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo, Plasma Mobile: give the LEFT screen (screen 0, DSI-1) its own status bar and navigation bar. Plasma
+# Mobile's layout creates them for one screen only (here the right one), so the left screen had no home/back/switcher.
+# Plasma's scripting API ignores a screen argument for new panels, so: create both panels, wait until plasmashell has
+# saved them, stop plasmashell, set their lastScreen to 0, start it again. Runs once per user (marker below), from the
+# user unit duo-left-panels.service after the session is up. Backup of the layout: <appletsrc>.before-left-panels.
+set -e
+C=$HOME/.config/plasma-org.kde.plasma.mobileshell-appletsrc
+M=$HOME/.local/state/duo-left-panels.done
+[ -e "$M" ] && exit 0
+E() { busctl --user call org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell evaluateScript s "$1" | sed 's/^s "//; s/"$//'; }
+for i in $(seq 1 60); do E 'print("up")' 2>/dev/null | grep -q up && break; sleep 2; done
+L=$(E 'var s=""; var ps=panels(); for (var i=0;i<ps.length;i++) s += ps[i].screen + ":" + ps[i].type + " "; print(s);')
+case "$L" in *0:org.kde.plasma.mobile.taskpanel*) mkdir -p "${M%/*}"; touch "$M"; exit 0 ;; esac
+cp "$C" "$C.before-left-panels"
+ids=$(E 'var b = new Panel("org.kde.plasma.mobile.taskpanel"); b.location = "bottom"; b.height = 2 * gridUnit;
+var t = new Panel("org.kde.plasma.mobile.panel"); t.location = "top"; t.height = 1.25 * gridUnit; print(b.id + " " + t.id);')
+saved() { for i in $ids; do grep -A12 "^\[Containments\]\[$i\]\$" "$C" | grep -q '^plugin=' || return 1; done; }
+for k in $(seq 1 60); do saved && break; sleep 1; done
+saved || { echo "duo-left-panels: plasmashell did not save the new panels ($ids)"; exit 1; }
+systemctl --user stop plasma-plasmashell
+for i in $ids; do kwriteconfig6 --file "$C" --group Containments --group "$i" --key lastScreen 0; done
+systemctl --user start plasma-plasmashell
+mkdir -p "${M%/*}"; touch "$M"
+echo "duo-left-panels: panels $ids moved to the left screen"

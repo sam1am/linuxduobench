@@ -37,6 +37,7 @@ docker volume create duo-build
 docker run --rm -it --privileged -v duo-build:/root -v "$PWD":/repo debian:trixie bash
 # inside:
 NO_EFI=1 /repo/tools/linux/kernel/build.sh /repo           # -> /root/build-duo, ends KERNEL_BUILD_DONE
+/repo/tools/host/make-sensor-debs.sh /repo                  # -> /root/sensor-debs, ends SENSOR_DEBS_DONE
 /repo/tools/host/make-debian-root.sh /repo /root/build-duo /repo/keys.pub /root/duo-debian-root.tar.zst
 ```
 `make-debian-root.sh` runs debootstrap (trixie arm64), installs Plasma Mobile and the Duo services, copies the kernel
@@ -81,17 +82,48 @@ ssh root@169.254.66.1        # or the desktop user: ssh user@169.254.66.1
 Plasma Mobile comes up on both screens after about a minute. To return to Android, `devmem 0x0c264000 w 0` as root.
 
 ## Status (2026-11-11, one phone)
-| Works | Not yet |
+| Works | Built, needs a hands-on test |
 |---|---|
-| Plasma Mobile on both screens, smooth | Auto-rotation (sensors: no libssc packages in Debian yet) |
-| Touch on both screens, on-screen keyboard | Turning off the back screen when folded (hinge sensor) |
-| Wi-Fi scan + connect, Chromium browsing | Keyboard haptics (vibration does not fire) |
-| Brightness control | Desktop icons (Plasma Mobile shows apps in its drawer instead) |
-| Quick settings, app drawer, window close | Speaker, camera, modem, Bluetooth: untested on this install |
+| Plasma Mobile on both screens, smooth | Auto-rotation of both screens (landscape stacks them) |
+| Touch on both screens, on-screen keyboard | Back screen off when folded back (hinge sensor) |
+| Wi-Fi scan + connect, Chromium browsing | Keyboard haptics (driver fix verified on the I2C bus) |
+| Brightness control, light sensor (lux) | Swipe from a side edge to move an app to the other screen |
+| Quick settings, app drawer, window close | |
+| Status + navigation bar on both screens | **Not yet:** camera, speaker/modem/Bluetooth untested |
+| Sensors: accel, hinge angle, posture, hall, light, proximity | |
 | SSH over USB (ECM, `169.254.66.1`) | |
 
-Layout notes: the top panel and app drawer appear on both screens, the navigation bar only on the right one; pulling
-quick settings down on the right screen opens them on the left. Apps open on one screen.
+The home screen (Folio) starts with an empty page; apps are in the drawer (swipe up) and in each screen's dock.
+
+## The two-screen layer
+Everything below is installed by `make-debian-root.sh` (sensor packages from `tools/host/make-sensor-debs.sh`).
+- **Sensors.** Trixie has no libssc and builds iio-sensor-proxy without SSC support. `make-sensor-debs.sh` backports
+  sid's libssc 0.4.4 and iio-sensor-proxy 3.9 (Debian's own packaging; held with `apt-mark`) and builds
+  `duo-ssc-read` (`tools/linux/sensors/`), a generic SSC reader for the sensors libssc has no class for:
+  `duo-ssc-read hinge_angle posture` prints `hinge_angle 188.857 0.000 178.144` (degrees; 0 closed, 180 flat,
+  ~355 back to back).
+- **duo-posture** (systemd user unit in the Plasma session, `/usr/libexec/duo/duo-posture`):
+  - rotates both screens together from iio-sensor-proxy's orientation; landscape stacks them (the screen on the upper
+    edge on top), upside down swaps them, the 33 px hinge gap is kept. Plasma's rotation quick setting (auto-rotate
+    policy "Never") locks it.
+  - folded back (hinge >= 330 deg): switches the screen facing away off and disables its touchscreen in KWin, so the
+    hand on the back does nothing; apps move to the front screen. Which half faces away comes from the tilt of the
+    accelerometer's half: the first fold, a touch on the front screen teaches it (saved in
+    `~/.local/state/duo-posture.json`); after that turning the folded phone over swaps the screens. Unfolding
+    (<= 310 deg) restores both. Stopping the service restores both screens.
+  - log: `journalctl --user -u duo-posture`.
+- **KWin script `duo-dualscreen`** (`/usr/share/kwin/scripts/`): swipe in from a screen's right edge to send the active
+  app to the right screen, from the left edge to the left one; also Meta+Shift+Right/Left/O. Plasma Mobile shows apps
+  maximised without title bars, so there is nothing to drag; this is the replacement. (KWin's own "Window to Next
+  Screen" is refused under Plasma Mobile's `InteractiveWindowMoveEnabled=false`; the script uses
+  `sendClientToScreen`, which works. Moves only complete while the screens are on: with both DPMS-off KWin renders
+  nothing and apps never commit their new size.)
+- **duo-left-panels** (user unit, once): a status bar and navigation bar on the left screen too.
+- **Haptics:** kernel patch 0091 keeps every effect on for at least `min_play_ms` (40 ms, module parameter): a 10 ms
+  keyboard click was a start + stop that the driver collapsed into "stop" before the motor ever moved. Tune live:
+  `echo 60 > /sys/module/da7280/parameters/min_play_ms`.
+- **duo-reset:** resets the phone from Debian (no busybox `devmem` there): `systemd-run --on-active=3
+  /usr/libexec/duo/duo-reset`.
 
 ## Fixes found on the way (already in this fork)
 - **"Type HomeScreen unavailable" ... "module org.kde.kirigamiaddons.formcard is not installed":** Debian's

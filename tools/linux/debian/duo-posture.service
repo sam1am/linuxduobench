@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo: two-screen layout from the hinge + accelerometer (rotation, landscape stacking, back screen off when
+# folded). A systemd USER unit in the Plasma session; installed to /usr/lib/systemd/user, enabled with --global.
+[Unit]
+Description=Surface Duo posture (hinge, rotation, folded back screen)
+After=plasma-kwin_wayland.service plasma-plasmashell.service
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/libexec/duo/duo-posture
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=plasma-workspace.target

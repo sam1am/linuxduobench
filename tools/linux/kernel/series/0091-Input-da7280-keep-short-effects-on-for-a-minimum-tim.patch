@@ -1,0 +1,104 @@
+From 2073a0cf23b8dd73d35a3d2aa57a89b89e478fed Mon Sep 17 00:00:00 2001
+From: duo-workbench <duo@localhost>
+Date: Thu, 12 Nov 2026 00:31:31 +0000
+Subject: [PATCH] Input: da7280 - keep short effects on for a minimum time
+
+Userspace plays short haptic "clicks" as an effect start followed by a
+stop a few milliseconds later (Qt's haptics effect, used by on-screen
+keyboards, asks for 10 ms; hfd-service stops the effect itself when the
+duration is over). Playback only stores the requested state and
+schedules the work, so the stop usually overwrites the start before the
+work runs and the motor never moves. An LRA also needs some tens of
+milliseconds of drive before it can be felt.
+
+Defer a stop that arrives earlier than min_play_ms (default 40 ms, a
+module parameter; 0 turns it off) after the start.
+---
+ drivers/input/misc/da7280.c | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/drivers/input/misc/da7280.c b/drivers/input/misc/da7280.c
+index ec2b26643..fe3dac2c9 100644
+--- a/drivers/input/misc/da7280.c
++++ b/drivers/input/misc/da7280.c
+@@ -16,6 +16,8 @@
+ #include <linux/pwm.h>
+ #include <linux/regmap.h>
+ #include <linux/workqueue.h>
++#include <linux/jiffies.h>
++#include <linux/moduleparam.h>
+ #include <linux/uaccess.h>
+ 
+ /* Registers */
+@@ -231,6 +233,8 @@ struct da7280_haptic {
+ 	struct pwm_device *pwm_dev;
+ 
+ 	struct work_struct work;
++	struct delayed_work stop_work;	/* a stop that came before min_play_ms */
++	unsigned long start_jiffies;
+ 	int val;
+ 	u16 gain;
+ 	s16 level;
+@@ -489,6 +493,25 @@ static void da7280_haptic_deactivate(struct da7280_haptic *haptics)
+ 	haptics->active = false;
+ }
+ 
++/*
++ * Userspace plays short "clicks" as start + stop a few milliseconds apart (Qt's haptics effect used by on-screen
++ * keyboards: 10 ms; hfd-service then stops the effect itself). Both requests only set ->val and schedule the same
++ * work, so the stop usually overwrites the start before the work runs and the motor never moves; and an LRA needs
++ * some tens of milliseconds to be felt anyway. Keep every played effect on for at least this long.
++ */
++static unsigned int min_play_ms = 40;
++module_param(min_play_ms, uint, 0644);
++MODULE_PARM_DESC(min_play_ms, "Minimum time an effect plays, in ms (0: off)");
++
++static void da7280_haptic_stop_work(struct work_struct *work)
++{
++	struct da7280_haptic *haptics =
++		container_of(to_delayed_work(work), struct da7280_haptic, stop_work);
++
++	haptics->val = 0;
++	schedule_work(&haptics->work);
++}
++
+ static void da7280_haptic_work(struct work_struct *work)
+ {
+ 	struct da7280_haptic *haptics =
+@@ -681,6 +704,17 @@ static int da7280_haptics_playback(struct input_dev *dev,
+ 	}
+ 
+ 	if (likely(!haptics->suspended)) {
++		unsigned long min = msecs_to_jiffies(min_play_ms);
++		unsigned long played = jiffies - haptics->start_jiffies;
++
++		if (val) {
++			cancel_delayed_work(&haptics->stop_work);
++			haptics->start_jiffies = jiffies;
++		} else if (min && played < min) {
++			/* too early: stop once the minimum time has passed */
++			mod_delayed_work(system_wq, &haptics->stop_work, min - played);
++			return 0;
++		}
+ 		haptics->val = val;
+ 		schedule_work(&haptics->work);
+ 	}
+@@ -708,6 +742,7 @@ static void da7280_haptic_stop(struct da7280_haptic *haptics)
+ {
+ 	int error;
+ 
++	cancel_delayed_work_sync(&haptics->stop_work);
+ 	cancel_work_sync(&haptics->work);
+ 
+ 
+@@ -1207,6 +1242,7 @@ static int da7280_probe(struct i2c_client *client)
+ 	}
+ 
+ 	INIT_WORK(&haptics->work, da7280_haptic_work);
++	INIT_DELAYED_WORK(&haptics->stop_work, da7280_haptic_stop_work);
+ 
+ 	haptics->client = client;
+ 	i2c_set_clientdata(client, haptics);
+-- 
+2.47.3
+
