@@ -129,6 +129,10 @@ Everything below is installed by `make-debian-root.sh` (sensor packages from `to
   in s2idle (a kernel change; every other sensor stream would then have to stop before sleep). Idle suspend is off
   (`AutoSuspendAction=0`: the 2026-11-08 "freeze" was Plasma idle-suspending with nothing to wake it).
   Test hooks: `systemctl kill --kill-whom=main -s USR1 duo-lid` = closed for 10 s, `USR2` = open.
+- **App store:** Discover (Plasma Mobile's store) with Flatpak + Flathub only (3,100 arm64 apps on 2026-11-12).
+  Debian's Discover also carries a PackageKit backend for system packages; it is diverted to
+  `.../qt6/plugins/discover-disabled/` so Discover never upgrades Debian packages (the held / diverted Duo ones).
+  System updates stay with apt. Undo: `dpkg-divert --rename --remove .../qt6/plugins/discover/packagekit-backend.so`.
 - **Laptop keyboard when stacked** ([hingeboard](https://github.com/brysonwf/hingeboard), vendored in
   `tools/linux/hingeboard/`): with the phone rotated so the screens are one above the other, duo-posture runs
   hingeboard on the **lower** screen (apps on the lower screen move up first) and switches maliit off, so typing on

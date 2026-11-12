@@ -137,6 +137,15 @@ if ! stage fork; then
 	# s2idle: hexagonrpcd stopped before, the SLPI recovered (if needed) and the sensors restarted after
 	mkdir -p $R/usr/lib/systemd/system-sleep
 	ln -sf /usr/libexec/duo/duo-sensors-resume $R/usr/lib/systemd/system-sleep/duo-sensors
+	# app store: Discover with Flatpak + Flathub only. Debian builds Discover's PackageKit (system package) backend
+	# into plasma-discover; it is diverted away so Discover never upgrades the system (held/diverted Duo packages).
+	# No fwupd backend: nothing offers firmware updates on this phone.
+	chroot $R apt-get -q -y --no-install-recommends install plasma-discover plasma-discover-backend-flatpak flatpak \
+		> /dev/null 2>&1 || { echo "Discover/Flatpak packages failed"; exit 1; }
+	D=/usr/lib/aarch64-linux-gnu/qt6/plugins; mkdir -p $R$D/discover-disabled
+	chroot $R dpkg-divert --quiet --local --rename --divert $D/discover-disabled/packagekit-backend.so \
+		--add $D/discover/packagekit-backend.so
+	chroot $R flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 	# hingeboard (tools/linux/hingeboard): the laptop keyboard on the lower screen when the screens are stacked
 	chroot $R apt-get -q -y --no-install-recommends install python3-gi python3-gi-cairo python3-cairo python3-evdev \
 		gir1.2-gtk-4.0 gir1.2-gtk4layershell-1.0 libgtk4-layer-shell0 > /dev/null 2>&1 || { echo "hingeboard packages failed"; exit 1; }
