@@ -118,6 +118,12 @@ Everything below is installed by `make-debian-root.sh` (sensor packages from `to
   Screen" is refused under Plasma Mobile's `InteractiveWindowMoveEnabled=false`; the script uses
   `sendClientToScreen`, which works. Moves only complete while the screens are on: with both DPMS-off KWin renders
   nothing and apps never commit their new size.)
+- **Developer keyboard** (`tools/linux/debian/maliit-dev/`): maliit's English layout gets a top row with Esc, Tab,
+  sticky Ctrl and Alt (tap = applies to the next key and lights up; Ctrl then c = Ctrl+C, Ctrl then ← = Ctrl+Left)
+  and the four arrows, plus `-` and `/`. Long press: `-` = `_ = + *`, `/` = `\ | ~ \``, `,` = `; : ' " ( ) [ ] { } < >`,
+  `.` = `? ! @ # $ % ^ & *`; the top letter row keeps the digits. Keys go through maliit's `keysequence` action
+  (`QKeySequence::fromString`). The package's layout is diverted (`dpkg-divert`), and a `duo` keyboard profile makes
+  the keyboard 36 % of the screen height (was 30 %) so the extra row keeps the key size.
 - **duo-left-panels** (user unit, once): a status bar and navigation bar on the left screen too.
 - **Haptics:** kernel patch 0091 keeps every effect on for at least `min_play_ms` (40 ms, module parameter): a 10 ms
   keyboard click was a start + stop that the driver collapsed into "stop" before the motor ever moved. Tune live:
