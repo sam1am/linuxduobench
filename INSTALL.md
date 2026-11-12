@@ -75,4 +75,4 @@ With no Debian on the phone, the image stays in this RAM shell: radios and DSPs 
 `tools/linux/system/install.sh` and `tools/linux/debian/duo-debian-setup.sh` are how our Debian root was set up
 (services, firewall, audio, sensors, desktop). They expect a Debian 13 arm64 root of your own. How you place that root
 on the phone is up to you. Read the hard rules first: anything that writes the boot partitions is exactly what this
-release leaves out.
+release leaves out. This fork's way (the `win` partition, booted tethered): [docs/debian-on-win.md](docs/debian-on-win.md).

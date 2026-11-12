@@ -10,6 +10,9 @@ Qualcomm Snapdragon 855 / SM8150, codename "epsilon".
 > **Temporarily not maintained** - our test phone is bricked; we're looking for a cheap Surface Duo to continue.
 > Forks and patches welcome. Open items and notes: [`docs/`](docs/README.md).
 
+> **This fork:** Debian 13 + Plasma Mobile running from the `win` partition of a second Duo 1, booted tethered,
+> with no boot partition ever written: [`docs/debian-on-win.md`](docs/debian-on-win.md). Safety rules: [`CLAUDE.md`](CLAUDE.md).
+
 ## Drivers only
 Kernel patch series (device tree, DSI panel, HID-over-SPI touch, audio, camera, charger...), systemd hardware
 services, a Debian setup, and a RAM boot image for the phone's Qualcomm bootloader (ABL, `fastboot boot`).

@@ -45,7 +45,13 @@ if ! stage packages; then
 		pipewire-audio pipewire-pulse wireplumber alsa-utils xwayland fonts-noto-core fonts-noto-color-emoji \
 		plasma-mobile plasma-mobile-tweaks plasma-workspace kwin-wayland plasma-nm plasma-pa powerdevil \
 		konsole dolphin kate qml6-module-qtquick-virtualkeyboard maliit-keyboard xdg-user-dirs \
+		qml6-module-org-kde-kirigamiaddons-formcard qml6-module-org-kde-kirigamiaddons-components \
+		qml6-module-org-kde-kirigamiaddons-delegates qml6-module-org-kde-kirigamiaddons-labs-components \
+		qml6-module-org-kde-kirigamiaddons-settings qml6-module-org-kde-kirigamiaddons-datetime \
+		qml6-module-qt-labs-platform qt6-svg-plugins qt6-image-formats-plugins kimageformat6-plugins \
 		> /root/apt-base.log 2>&1 || { tail -8 /root/apt-base.log; exit 1; }
+		# (Debian's plasma-mobile does not depend on the Kirigami Addons modules its home screen imports, and with
+		#  --no-install-recommends Qt has no SVG decoder: without these the shell shows only "Type ... unavailable")
 	done_ packages
 fi
 
