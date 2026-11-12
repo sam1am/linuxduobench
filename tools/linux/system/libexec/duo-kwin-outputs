@@ -1,0 +1,54 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""duo-kwin-outputs: before the desktop starts, make KWin drive both Duo panels' brightness by their backlights only.
+
+KWin saved DSI-2 (the right panel) with allowSdrSoftwareBrightness=true and DSI-1 with false (2026-11-12): at the same
+slider value both backlights read the same (205/1023) but the right panel was visibly dimmer - KWin also darkened its
+picture in software. (Probably because the right panel's backlight appears later at boot than KWin's first look.)
+KWin reads ~/.config/kwinoutputconfig.json only when it starts and rewrites it itself, so this runs before the display
+manager (duo-kwin-outputs.service) and sets the flag to false for the DSI outputs of every user that has the file.
+"""
+import glob, json, os, sys
+
+
+def fix(path):
+    """runs as the file's owner (see below): read, change, write back via a temp file in the same directory"""
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return
+    changed = []
+    for sec in d if isinstance(d, list) else []:
+        if sec.get("name") != "outputs":
+            continue
+        for o in sec.get("data", []):
+            if str(o.get("connectorName", "")).startswith("DSI-") and o.get("allowSdrSoftwareBrightness"):
+                o["allowSdrSoftwareBrightness"] = False
+                changed.append(o["connectorName"])
+    if changed:
+        with open(path + ".tmp", "w") as f:
+            json.dump(d, f, indent=4)
+        os.replace(path + ".tmp", path)
+        print(f"duo-kwin-outputs: {path}: software brightness off for {', '.join(changed)}", flush=True)
+
+
+# The files live in users' home directories: never touch them as root (a planted symlink, e.g. at the .tmp name,
+# would make root write wherever it points). Each one is handled in a child that has dropped to the owner of the
+# user's home directory, so it can do nothing that user could not do anyway.
+for path in glob.glob("/home/*/.config/kwinoutputconfig.json"):
+    try:
+        home = os.lstat(os.path.dirname(os.path.dirname(path)))
+    except OSError:
+        continue
+    if home.st_uid == 0:
+        continue
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setgroups([]); os.setgid(home.st_gid); os.setuid(home.st_uid)
+            fix(path)
+        finally:
+            os._exit(0)
+    os.waitpid(pid, 0)
+sys.exit(0)
