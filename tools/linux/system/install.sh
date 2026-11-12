@@ -17,7 +17,7 @@ esac; done
 case $INIT in systemd|openrc) ;; *) echo "--init=systemd or --init=openrc"; exit 1 ;; esac
 ROOT=${ROOT%/}
 # services, in start order (gps-assist needs the duo-gps tool: enabled only when it is installed)
-SVC="duo-watchdog duo-bootanim duo-hw duo-bootanim-done duo-charger duo-modem duo-sensors duo-bt-addr duo-mtp duo-autobrightness"
+SVC="duo-watchdog duo-bootanim duo-hw duo-bootanim-done duo-charger duo-modem duo-sensors duo-bt-addr duo-mtp duo-autobrightness duo-lid"
 
 # write a new file and rename it over the old one: never truncate a script that is running (sh reads scripts as it
 # goes - rewriting the live watchdog feeder in place could kill it, and a dead feeder = a watchdog reset)

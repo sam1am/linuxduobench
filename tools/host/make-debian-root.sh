@@ -131,6 +131,9 @@ if ! stage fork; then
 	ROOT=$R sh $L/debian/maliit-dev/install.sh
 	# each screen's navigation bar closes the app on its own screen
 	ROOT=$R sh $L/debian/plasma-mobile-perscreen/install.sh
+	# closing the phone = a laptop lid (duo-lid, enabled by install.sh): Plasma turns the screens off, logind ignores it
+	install -D -m644 $L/debian/50-duo-lid.conf $R/etc/systemd/logind.conf.d/50-duo-lid.conf
+	install -D -m644 $L/debian/powerdevilrc $R/etc/xdg/powerdevilrc
 	# hingeboard (tools/linux/hingeboard): the laptop keyboard on the lower screen when the screens are stacked
 	chroot $R apt-get -q -y --no-install-recommends install python3-gi python3-gi-cairo python3-cairo python3-evdev \
 		gir1.2-gtk-4.0 gir1.2-gtk4layershell-1.0 libgtk4-layer-shell0 > /dev/null 2>&1 || { echo "hingeboard packages failed"; exit 1; }

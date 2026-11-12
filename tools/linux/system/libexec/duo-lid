@@ -1,0 +1,67 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""duo-lid: the Surface Duo's hinge as a laptop lid switch.
+
+Reads the hinge angle (duo-ssc-read hinge_angle: 0 closed, 180 flat) and drives a uinput switch device with SW_LID
+("Surface Duo hinge lid"): closed at <= LID_CLOSE degrees, open again at >= LID_OPEN. UPower and Plasma's power
+management then do what Settings > Power says for "When laptop lid closed" (turn the screens off, sleep, ...) and
+wake the screens when it opens. A system service (root, from boot) rather than part of duo-posture: UPower keeps the
+first lid device it sees and ignores a replacement, so the device must live as long as the boot.
+logind ignores the lid (/etc/systemd/logind.conf.d/50-duo-lid.conf): Plasma decides.
+"""
+import signal, subprocess, sys, time
+import evdev
+from evdev import ecodes as E
+
+LID_CLOSE, LID_OPEN = 10.0, 25.0
+
+
+def log(*a):
+    print("duo-lid:", *a, flush=True)
+
+
+def main():
+    lid = evdev.UInput({E.EV_SW: [E.SW_LID]}, name="Surface Duo hinge lid")
+    lid.write(E.EV_SW, E.SW_LID, 0); lid.syn()
+    closed = False
+    log("lid device", lid.device.path)
+
+    # test hooks: SIGUSR1 = report closed, SIGUSR2 = report open, for 10 s (hinge readings are ignored meanwhile)
+    hold = [0.0]
+    def force(state):
+        def h(*_):
+            nonlocal closed
+            closed = state; hold[0] = time.monotonic() + 10
+            lid.write(E.EV_SW, E.SW_LID, 1 if state else 0); lid.syn()
+            log("test:", "closed" if state else "open")
+        return h
+    signal.signal(signal.SIGUSR1, force(True))
+    signal.signal(signal.SIGUSR2, force(False))
+    while True:
+        p = subprocess.Popen(["duo-ssc-read", "hinge_angle"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             text=True, bufsize=1)
+        for line in p.stdout:
+            v = line.split()
+            if len(v) < 2 or v[0] != "hinge_angle":
+                continue
+            a = float(v[1])
+            if time.monotonic() < hold[0]:
+                continue
+            want = True if a <= LID_CLOSE else False if a >= LID_OPEN else closed
+            if want != closed:
+                closed = want
+                lid.write(E.EV_SW, E.SW_LID, 1 if closed else 0); lid.syn()
+                log("closed" if closed else "open", f"({a:.0f} deg)")
+        p.wait()
+        if closed:                            # no hinge readings: never leave the lid "closed" behind
+            closed = False
+            lid.write(E.EV_SW, E.SW_LID, 0); lid.syn()
+            log("hinge reader stopped: lid open")
+        time.sleep(5)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)

@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo: the hinge as a laptop lid switch (duo-lid); Plasma's power settings decide what closing does
+[Unit]
+Description=Surface Duo hinge as a laptop lid (screens off / sleep when closed)
+After=duo-sensors.service
+Wants=duo-sensors.service
+Before=upower.service display-manager.service
+
+[Service]
+ExecStart=/usr/libexec/duo/duo-lid
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

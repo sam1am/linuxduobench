@@ -115,6 +115,14 @@ Everything below is installed by `make-debian-root.sh` (sensor packages from `to
   - **swipe along the top of a screen towards the hinge** (start in the top 5 %, at least 40 % of the width, within
     2 s; both screens open, portrait): that screen's app moves to the other screen.
   - log: `journalctl --user -u duo-posture`.
+- **Closing the phone** (`duo-lid`, a system service): the hinge angle drives a virtual laptop lid (uinput
+  `SW_LID`; closed at <= 10 deg, open at >= 25). UPower sees it as a laptop lid, so Plasma's "When laptop lid closed"
+  setting applies: the default here (`/etc/xdg/powerdevilrc`) is *turn off screen*, with "inhibit when an external
+  monitor is present" off (Plasma counts the second screen as external). Opening wakes both screens (duo-posture).
+  logind ignores the lid (`/etc/systemd/logind.conf.d/50-duo-lid.conf`). **Not yet: sleep (s2idle) on close** - the
+  suspend tests (2026-11-04) needed UFS at `spm_lvl` 5 and were done before UFS power saving was switched on; the
+  current `spm_lvl` 3 is untested, and a UFS that does not come back takes the root file system with it.
+  Test hooks: `systemctl kill --kill-whom=main -s USR1 duo-lid` = closed for 10 s, `USR2` = open.
 - **Laptop keyboard when stacked** ([hingeboard](https://github.com/brysonwf/hingeboard), vendored in
   `tools/linux/hingeboard/`): with the phone rotated so the screens are one above the other, duo-posture runs
   hingeboard on the **lower** screen (apps on the lower screen move up first) and switches maliit off, so typing on

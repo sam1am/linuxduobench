@@ -21,6 +21,7 @@ Nothing here writes to the phone's storage except the small state file in the us
 import json, os, re, select, signal, struct, subprocess, sys, time
 
 FOLD_ON, FOLD_OFF = 330.0, 310.0     # degrees, with hysteresis
+# (closing the phone = a laptop lid: the system service duo-lid, so UPower sees one lid for the whole boot)
 GAP = 33                             # logical px between the panels (the hinge), as org.duo.HingeGap.desktop
 SCALE_W, SCALE_H = 1350, 1800        # native portrait mode
 TOUCH = {"045E:0C02": "DSI-1", "045E:0C01": "DSI-2"}   # iptsd virtual touchscreen -> output
@@ -63,6 +64,7 @@ class Posture:
         self.held = {LEFT: False, RIGHT: False}     # a finger is on that screen right now
         self.picked_by, self.decided_tilt = None, 0
         self.hb = self.hb_out = None; self.hb_dismissed = False; self.exiting = False
+        self.closed = False
         self.scale = 2.55
 
     # ---------- state ----------
@@ -191,6 +193,19 @@ class Posture:
     # ---------- decisions ----------
     def on_angle(self, a):
         self.angle = a
+        # closing = duo-lid's lid switch: Plasma turns the screens off (and KWin the "laptop panel" DSI-1). Opening
+        # brings DSI-1 back but leaves the other screen DPMS-off: wake both, as user activity would.
+        if a <= 10.0:
+            self.closed = True
+        elif a >= 25.0 and self.closed:
+            self.closed = False
+            log(f"opened ({a:.0f} deg): waking the screens")
+            # (ScreenSaver.SimulateUserActivity does not wake DPMS-off outputs here; kscreen-doctor once aborted: retry)
+            for _ in range(2):
+                r = subprocess.run(["kscreen-doctor", "--dpms", "on"], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=10)
+                if r.returncode == 0:
+                    break
         if not self.folded and a >= FOLD_ON:
             self.folded = True
             self.front = None
