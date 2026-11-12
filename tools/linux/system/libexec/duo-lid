@@ -1,62 +1,93 @@
 #!/usr/bin/python3 -I
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""duo-lid: the Surface Duo's hinge as a laptop lid switch.
+"""duo-lid: the Surface Duo's hinge as a laptop lid switch, and sleep when it stays closed.
 
 Reads the hinge angle (duo-ssc-read hinge_angle: 0 closed, 180 flat) and drives a uinput switch device with SW_LID
 ("Surface Duo hinge lid"): closed at <= LID_CLOSE degrees, open again at >= LID_OPEN. UPower and Plasma's power
-management then do what Settings > Power says for "When laptop lid closed" (turn the screens off, sleep, ...) and
-wake the screens when it opens. A system service (root, from boot) rather than part of duo-posture: UPower keeps the
-first lid device it sees and ignores a replacement, so the device must live as long as the boot.
-logind ignores the lid (/etc/systemd/logind.conf.d/50-duo-lid.conf): Plasma decides.
+management then do what Settings > Power says for "When laptop lid closed" (here: turn the screens off).
+Still closed after DUO_LID_SLEEP seconds (default 30; 0 = never): suspend (s2idle). Wake: the power key or a touch on
+a screen (opening the phone does not wake it yet: the hinge sensor's reports are not a wakeup source in s2idle).
+A system service (root, from boot) rather than part of duo-posture: UPower keeps the first lid device it sees and
+ignores a replacement, so the device must live as long as the boot. logind ignores the lid (50-duo-lid.conf).
+Test hooks: SIGUSR1 = report closed, SIGUSR2 = report open, for 10 s (hinge readings ignored meanwhile).
 """
-import signal, subprocess, sys, time
+import os, select, signal, subprocess, sys, time
 import evdev
 from evdev import ecodes as E
 
 LID_CLOSE, LID_OPEN = 10.0, 25.0
+SLEEP_AFTER = float(os.environ.get("DUO_LID_SLEEP", "30"))
 
 
 def log(*a):
     print("duo-lid:", *a, flush=True)
 
 
-def main():
-    lid = evdev.UInput({E.EV_SW: [E.SW_LID]}, name="Surface Duo hinge lid")
-    lid.write(E.EV_SW, E.SW_LID, 0); lid.syn()
-    closed = False
-    log("lid device", lid.device.path)
+class Lid:
+    def __init__(self):
+        self.dev = evdev.UInput({E.EV_SW: [E.SW_LID]}, name="Surface Duo hinge lid")
+        self.closed = False
+        self.since = 0.0               # monotonic time the lid closed (or the last suspend returned)
+        self.hold = 0.0
+        self.emit()
+        log("lid device", self.dev.device.path, f"(sleep after {SLEEP_AFTER:.0f} s closed)" if SLEEP_AFTER else "(no sleep)")
 
-    # test hooks: SIGUSR1 = report closed, SIGUSR2 = report open, for 10 s (hinge readings are ignored meanwhile)
-    hold = [0.0]
+    def emit(self):
+        self.dev.write(E.EV_SW, E.SW_LID, 1 if self.closed else 0); self.dev.syn()
+
+    def set(self, closed, why):
+        if closed != self.closed:
+            self.closed = closed
+            self.since = time.monotonic()
+            self.emit()
+            log("closed" if closed else "open", why)
+
+    def tick(self):
+        if not (self.closed and SLEEP_AFTER) or time.monotonic() - self.since < SLEEP_AFTER:
+            return
+        log(f"closed for {SLEEP_AFTER:.0f} s: suspending")
+        os.sync()
+        r = subprocess.run(["systemctl", "suspend"], capture_output=True, text=True, timeout=30)
+        if r.returncode:
+            log("suspend refused:", r.stderr.strip()[:200])
+        # the clock does not run in s2idle: count again from here (woken while still closed = sleep again later)
+        self.since = time.monotonic() + SLEEP_AFTER
+
+
+def main():
+    lid = Lid()
+
     def force(state):
         def h(*_):
-            nonlocal closed
-            closed = state; hold[0] = time.monotonic() + 10
-            lid.write(E.EV_SW, E.SW_LID, 1 if state else 0); lid.syn()
-            log("test:", "closed" if state else "open")
+            lid.hold = time.monotonic() + 10
+            lid.set(state, "(test)")
         return h
     signal.signal(signal.SIGUSR1, force(True))
     signal.signal(signal.SIGUSR2, force(False))
+
     while True:
         p = subprocess.Popen(["duo-ssc-read", "hinge_angle"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                              text=True, bufsize=1)
-        for line in p.stdout:
-            v = line.split()
-            if len(v) < 2 or v[0] != "hinge_angle":
+        while True:
+            try:
+                r, _, _ = select.select([p.stdout], [], [], 1.0)
+            except InterruptedError:
                 continue
-            a = float(v[1])
-            if time.monotonic() < hold[0]:
-                continue
-            want = True if a <= LID_CLOSE else False if a >= LID_OPEN else closed
-            if want != closed:
-                closed = want
-                lid.write(E.EV_SW, E.SW_LID, 1 if closed else 0); lid.syn()
-                log("closed" if closed else "open", f"({a:.0f} deg)")
+            if r:
+                line = p.stdout.readline()
+                if not line:
+                    break
+                v = line.split()
+                if len(v) >= 2 and v[0] == "hinge_angle" and time.monotonic() >= lid.hold:
+                    a = float(v[1])
+                    if a <= LID_CLOSE:
+                        lid.set(True, f"({a:.0f} deg)")
+                    elif a >= LID_OPEN:
+                        lid.set(False, f"({a:.0f} deg)")
+            lid.tick()
         p.wait()
-        if closed:                            # no hinge readings: never leave the lid "closed" behind
-            closed = False
-            lid.write(E.EV_SW, E.SW_LID, 0); lid.syn()
-            log("hinge reader stopped: lid open")
+        # no hinge readings (e.g. the sensor DSP restarted after a suspend): never leave the lid "closed" behind
+        lid.set(False, "(hinge reader stopped)")
         time.sleep(5)
 
 

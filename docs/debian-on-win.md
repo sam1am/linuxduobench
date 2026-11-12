@@ -115,7 +115,8 @@ Everything below is installed by `make-debian-root.sh` (sensor packages from `to
   - **swipe along the top of a screen towards the hinge** (start in the top 5 %, at least 40 % of the width, within
     2 s; both screens open, portrait): that screen's app moves to the other screen.
   - log: `journalctl --user -u duo-posture`.
-- **Closing the phone** (`duo-lid`, a system service): the hinge angle drives a virtual laptop lid (uinput
+- **Closing the phone** (`duo-lid`, a system service): screens off at once, **sleep (s2idle) after 30 s closed**
+  (`DUO_LID_SLEEP=<s>` in the unit, 0 = never; wake: power key or a touch). The hinge angle drives a virtual lid (uinput
   `SW_LID`; closed at <= 10 deg, open at >= 25). UPower sees it as a laptop lid, so Plasma's "When laptop lid closed"
   setting applies: the default here (`/etc/xdg/powerdevilrc`) is *turn off screen*, with "inhibit when an external
   monitor is present" off (Plasma counts the second screen as external). Opening wakes both screens (duo-posture).
