@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo: the speaker amp's DAC on for real (a boot race leaves it off; see /usr/libexec/duo/duo-speaker-dac)
+[Unit]
+Description=Surface Duo speaker amp DAC check
+After=duo-hw.service sound.target
+Wants=sound.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/duo/duo-speaker-dac
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target

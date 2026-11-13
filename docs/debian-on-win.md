@@ -89,7 +89,7 @@ only the Sxmo session running the phone uses about 0.8 GB of RAM (Plasma: about 
 
 | Works | Not yet / untested |
 |---|---|
-| Both screens independent: own bar, workspace, touch, gestures, keyboard | Speaker / audio output (next) |
+| Both screens independent: own bar, workspace, touch, gestures, keyboard | Speaker tuning (EQ / loudness) |
 | One app per screen + overview (switch, close, bring across) | Camera, modem, Bluetooth audio |
 | Rotation: auto, manual, semi-auto (tap a button to confirm) | hingeboard under Sway (not installed) |
 | Fold back: the touched screen turns off, apps stay where they are | |
@@ -97,6 +97,7 @@ only the Sxmo session running the phone uses about 0.8 GB of RAM (Plasma: about 
 | Wi-Fi, Chromium, Discover (Flatpak), Dolphin, foot | |
 | Per-screen brightness, screen off on idle / power key / closing | |
 | Sensors: accel, hinge angle, posture, hall, light, proximity; SSH over USB | |
+| Speaker + microphones (PipeWire), volume keys with an on-screen bar | |
 
 ## The two-screen layer
 Everything below is installed by `make-debian-root.sh` (sensor packages from `tools/host/make-sensor-debs.sh`).
@@ -167,6 +168,14 @@ Everything below is installed by `make-debian-root.sh` (sensor packages from `to
   /usr/libexec/duo/duo-reset`.
 
 ## Fixes found on the way (already in this fork)
+- **No sound (2026-11-13), two causes.** (1) The UCM file is named for the card's DMI long name
+  `MicrosoftCorporation-SurfaceDuo-1930`, but booted this way the card has no DMI and is called `Surface-Duo`: ALSA
+  found no UCM, PipeWire offered only "Off" / "Pro Audio" and played into a dummy sink. The file is now installed under
+  both names (`duo-files.list`). (2) The speaker amp's DAC stayed off: the WSA8815 autosuspends 3 s after probing and its
+  registers go cache-only; the card's first DAPM power-up of "RDAC" (bit 7 of 0x311c) then failed with -EBUSY, was
+  dropped, and DAPM never retries (always-complete path). `duo-speaker-dac` (boot + after resume) sets that bit when
+  DAPM says on and the hardware says off. Checked with the phone's own mics: a 440 Hz tone went from -78 to -40 dBFS.
+  The kernel fix (keep the amp resumed while bound) is still to do.
 - **SDDM reads every file in `/etc/sddm.conf.d/`:** a backup kept there (`*.conf.plasma`) overrode the real
   autologin file. Keep backups elsewhere.
 - **Switching desktops from SSH:** restarting sddm ends only the compositor; the old session's systemd user units

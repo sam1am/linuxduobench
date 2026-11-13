@@ -127,6 +127,8 @@ if ! stage fork; then
 	# s2idle: hexagonrpcd stopped before, the SLPI recovered (if needed) and the sensors restarted after
 	mkdir -p $R/usr/lib/systemd/system-sleep
 	ln -sf /usr/libexec/duo/duo-sensors-resume $R/usr/lib/systemd/system-sleep/duo-sensors
+	# the speaker amp's DAC after a resume (duo-speaker-dac: a dropped register write leaves it off)
+	ln -sf /usr/libexec/duo/duo-speaker-dac $R/usr/lib/systemd/system-sleep/duo-speaker-dac
 	# app store: Discover with Flatpak + Flathub only. Debian builds Discover's PackageKit (system package) backend
 	# into plasma-discover; it is diverted away so Discover never upgrades the system (held/diverted Duo packages).
 	# No fwupd backend: nothing offers firmware updates on this phone.

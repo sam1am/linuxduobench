@@ -79,7 +79,7 @@ if [ -s /tmp/duo-gps.c ]; then
 fi
 rm -f /usr/sbin/policy-rc.d
 systemctl enable nftables ssh sddm NetworkManager duo-hw duo-watchdog duo-autobrightness duo-bootanim duo-bootanim-done \
-  duo-charger duo-bt-addr duo-sensors duo-modem duo-mtp > /dev/null 2>&1
+  duo-charger duo-bt-addr duo-sensors duo-modem duo-mtp duo-lid duo-speaker-dac > /dev/null 2>&1
 # (the slot self-recovery is not in the source-only public release: only when its unit exists)
 # self-recovery: the slot is marked good only by duo-boot-check (45 s, healthy); qbootctl's own "mark at once" unit is
 # masked (installer.md "Self-recovery")

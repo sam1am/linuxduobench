@@ -1,0 +1,44 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo: make sure the speaker amp's DAC is really on (found 2026-11-13: no sound at all).
+# The WSA8815 amp (SoundWire sdw:0:0:0217:2110:00:3) autosuspends 3 s after it probes; its driver then keeps the
+# registers cache-only. When the sound card comes up in that window, DAPM's "RDAC" power-up (bit 7 of
+# WSA881X_SPKR_DAC_CTL, 0x311c) needs a register that is not cached yet -> -EBUSY ("ASoC error (-16) ... [0x0000311c]"),
+# the write is dropped, but DAPM records RDAC as on. RDAC sits on an always-complete path (IN -> RDAC -> SPKR), so DAPM
+# never powers it again: the amp is powered and gets audio, its DAC stays off, the speaker is silent.
+# This waits for the amp, and if DAPM says RDAC is on while the hardware bit is clear, sets that one bit through the
+# SoundWire debugfs (the kernel fix: keep the amp resumed while its component is bound - not in this kernel yet).
+# Runs at boot (duo-speaker-dac.service) and after a resume (systemd-sleep hook: post).
+#   usage: duo-speaker-dac [post <type>] | check   (check: report only)
+SDW=sdw:0:0:0217:2110:00:3
+DBG=/sys/kernel/debug
+REG=$((0x311c)); BIT=$((0x80))
+log() { echo "duo-speaker-dac: $*"; [ -w /dev/kmsg ] && echo "duo-speaker-dac: $*" > /dev/kmsg; }
+case "$1" in pre) exit 0 ;; esac
+mountpoint -q $DBG || mount -t debugfs none $DBG 2> /dev/null
+S=$DBG/soundwire/master-0-0/$SDW
+W="$DBG/asoc/Surface-Duo/$SDW/dapm/SpkrLeft RDAC"
+# the amp attached and the card's DAPM up (at boot both take a while; after resume the amp re-attaches)
+for i in $(seq 1 120); do
+	[ "$(cat /sys/bus/soundwire/devices/$SDW/status 2> /dev/null)" = Attached ] && [ -r "$W" ] && [ -d "$S" ] && break
+	sleep 0.5
+done
+[ -d "$S" ] && [ -r "$W" ] || { log "no speaker amp / DAPM (not a Duo, or sound is off)"; exit 0; }
+hw() {   # read the register from the amp itself
+	echo 1 > $S/command; echo $REG > $S/start_address; echo 1 > $S/num_bytes; echo 1 > $S/go 2> /dev/null || return 1
+	sed -n 's/.*val 0x\([0-9a-f]*\).*/\1/p' $S/read_buffer | head -n1
+}
+v=$(hw) || { log "cannot read the amp"; exit 1; }
+[ -n "$v" ] || { log "cannot read the amp"; exit 1; }
+v=$((0x$v))
+dapm_on=0; head -n1 "$W" | grep -q ': On' && dapm_on=1
+if [ $dapm_on = 1 ] && [ $((v & BIT)) = 0 ]; then
+	[ "$1" = check ] && { log "DAC OFF in hardware while DAPM has it on (0x311c = $(printf 0x%02x $v))"; exit 2; }
+	n=$((v | BIT)); f=/lib/firmware/duo-speaker-dac.bin
+	printf "\\$(printf %03o $n)" > $f
+	echo 0 > $S/command; echo $REG > $S/start_address; echo 1 > $S/num_bytes; echo ${f##*/} > $S/firmware_file
+	echo 1 > $S/go; rm -f $f
+	log "speaker DAC was off in hardware (0x311c $(printf 0x%02x $v)): set to $(printf 0x%02x $(hw | sed 's/^/0x/'))"
+else
+	log "speaker DAC ok (0x311c $(printf 0x%02x $v), DAPM $([ $dapm_on = 1 ] && echo on || echo off))"
+fi

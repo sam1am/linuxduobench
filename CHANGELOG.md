@@ -24,6 +24,7 @@ table or lock state was written.
 - OpenSnitch (its pop-ups were hard to answer on the phone) and the KDE Settings, Konsole and Kate apps. Discover (Flatpak) and Dolphin stay.
 
 ### Fixes
+- No sound: the UCM file was named for a card name this boot path does not produce, and a boot race left the speaker amp's DAC off (`duo-speaker-dac` turns it on at boot and after resume). The volume keys now control the volume.
 - `duo-mtp` created `~/Downloads` and `~/Pictures` as root, so the user could not save into them.
 
 ## duo-debian-2026.11.12

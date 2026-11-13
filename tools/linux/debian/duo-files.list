@@ -3,6 +3,7 @@
 # from the PC) and duo-debian-bootstrap.sh (installer, on the phone).
 pmos/duo-health.sh:usr/local/sbin/duo-health
 pmos/ucm/conf.d/sdm845/MicrosoftCorporation-SurfaceDuo-1930.conf:usr/share/alsa/ucm2/conf.d/sdm845/MicrosoftCorporation-SurfaceDuo-1930.conf
+pmos/ucm/conf.d/sdm845/MicrosoftCorporation-SurfaceDuo-1930.conf:usr/share/alsa/ucm2/conf.d/sdm845/Surface-Duo.conf
 pmos/ucm/Microsoft/SurfaceDuo/HiFi.conf:usr/share/alsa/ucm2/Microsoft/SurfaceDuo/HiFi.conf
 pmos/ucm/Microsoft/SurfaceDuo/Speaker.conf:usr/share/alsa/ucm2/Microsoft/SurfaceDuo/Speaker.conf
 pmos/wireplumber/51-duo-no-loopback.conf:etc/wireplumber/wireplumber.conf.d/51-duo-no-loopback.conf
