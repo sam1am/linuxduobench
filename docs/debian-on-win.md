@@ -178,7 +178,10 @@ Everything below is installed by `make-debian-root.sh` (sensor packages from `to
   The kernel fix (keep the amp resumed while bound) is still to do.
 - **Speaker quiet / volume keys dead (2026-11-13).** The speaker tuning (PipeWire filter-chain: high-pass, EQ, ZaMaximX2
   limiter with about 8 dB make-up gain) was never active: its limiter comes from `zam-plugins`, which was not installed.
-  The amp itself stays at 0 dB PA gain, as on Android (its loudness comes from the DSP's MBDRC). The volume keys went
+  The amp's PA gain is now +12 dB (UCM `PA Volume` 8; the control is inverted: 12 = +18 dB, 0 = 0 dB; Android runs 0 dB
+  plus its DSP's MBDRC). The PA's power-up writes (over-current protection, MISC_CTL1, gain taken from the register:
+  bit 3 of 0x311b) were lost in the same boot window as the DAC bit, so the amp ignored its gain until something
+  powered it up again; `duo-speaker-dac` repairs those too. No speaker protection: keep the volume moderate. The volume keys went
   through sxmo's `sxmo_multikey.sh`, which fails for good after more than ~4 quick presses (its press counter file is
   left behind); `duo-sway-init` binds them straight to `sxmo_audio.sh vol up/down 5` (held = repeat, with the bar).
 - **SDDM reads every file in `/etc/sddm.conf.d/`:** a backup kept there (`*.conf.plasma`) overrode the real

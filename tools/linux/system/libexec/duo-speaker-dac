@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Surface Duo: make sure the speaker amp's DAC is really on (found 2026-11-13: no sound at all).
+# Surface Duo: make sure the speaker amp's DAC and PA are really set up (found 2026-11-13: no sound, then barely any).
 # The WSA8815 amp (SoundWire sdw:0:0:0217:2110:00:3) autosuspends 3 s after it probes; its driver then keeps the
 # registers cache-only. When the sound card comes up in that window, DAPM's "RDAC" power-up (bit 7 of
 # WSA881X_SPKR_DAC_CTL, 0x311c) needs a register that is not cached yet -> -EBUSY ("ASoC error (-16) ... [0x0000311c]"),
@@ -24,21 +24,34 @@ for i in $(seq 1 120); do
 	sleep 0.5
 done
 [ -d "$S" ] && [ -r "$W" ] || { log "no speaker amp / DAPM (not a Duo, or sound is off)"; exit 0; }
-hw() {   # read the register from the amp itself
-	echo 1 > $S/command; echo $REG > $S/start_address; echo 1 > $S/num_bytes; echo 1 > $S/go 2> /dev/null || return 1
-	sed -n 's/.*val 0x\([0-9a-f]*\).*/\1/p' $S/read_buffer | head -n1
+rd() {   # rd REG: one register from the amp itself, as a number
+	echo 1 > $S/command; echo $(($1)) > $S/start_address; echo 1 > $S/num_bytes; echo 1 > $S/go 2> /dev/null || return 1
+	x=$(sed -n 's/.*val 0x\([0-9a-f]*\).*/\1/p' $S/read_buffer | head -n1); [ -n "$x" ] && echo $((0x$x))
 }
-v=$(hw) || { log "cannot read the amp"; exit 1; }
-[ -n "$v" ] || { log "cannot read the amp"; exit 1; }
-v=$((0x$v))
-dapm_on=0; head -n1 "$W" | grep -q ': On' && dapm_on=1
-if [ $dapm_on = 1 ] && [ $((v & BIT)) = 0 ]; then
-	[ "$1" = check ] && { log "DAC OFF in hardware while DAPM has it on (0x311c = $(printf 0x%02x $v))"; exit 2; }
-	n=$((v | BIT)); f=/lib/firmware/duo-speaker-dac.bin
-	printf "\\$(printf %03o $n)" > $f
-	echo 0 > $S/command; echo $REG > $S/start_address; echo 1 > $S/num_bytes; echo ${f##*/} > $S/firmware_file
+wr() {   # wr REG VALUE: one register on the amp (the SoundWire debugfs writes from a firmware file)
+	f=/lib/firmware/duo-speaker-dac.bin
+	printf "\\$(printf %03o $2)" > $f
+	echo 0 > $S/command; echo $(($1)) > $S/start_address; echo 1 > $S/num_bytes; echo ${f##*/} > $S/firmware_file
 	echo 1 > $S/go; rm -f $f
-	log "speaker DAC was off in hardware (0x311c $(printf 0x%02x $v)): set to $(printf 0x%02x $(hw | sed 's/^/0x/'))"
-else
-	log "speaker DAC ok (0x311c $(printf 0x%02x $v), DAPM $([ $dapm_on = 1 ] && echo on || echo off))"
+}
+on() { head -n1 "$1" | grep -q ': On'; }
+P="$DBG/asoc/Surface-Duo/$SDW/dapm/SpkrLeft SPKR PGA"
+v=$(rd $REG) || { log "cannot read the amp"; exit 1; }
+g=$(rd 0x311b) || exit 1
+bad=
+on "$W" && [ $((v & BIT)) = 0 ] && bad="$bad DAC"
+# the PA's power-up (wsa881x_spkr_pa_event PRE_PMU): over-current protection on, MISC_CTL1, and gain taken from the
+# register (bit 3 of 0x311b) - lost the same way, the amp then ignores its gain setting
+on "$P" && [ $((g & 0x08)) = 0 ] && bad="$bad PA"
+if [ -z "$bad" ]; then
+	log "speaker ok (0x311c $(printf 0x%02x $v), 0x311b $(printf 0x%02x $g))"; exit 0
 fi
+[ "$1" = check ] && { log "lost in hardware:$bad (0x311c $(printf 0x%02x $v), 0x311b $(printf 0x%02x $g))"; exit 2; }
+case "$bad" in *PA*)
+	o=$(rd 0x311f); wr 0x311f $(( (o & 0x3f) | 0x80 )); wr 0x3122 0x87
+	# the gain itself: the control (inverted: 12 = +18 dB ... 0 = 0 dB) -> bits 7:4 = 12 - value
+	pv=$(amixer -c SurfaceDuo cget name='SpkrLeft PA Volume' 2> /dev/null | sed -n 's/.*: values=//p'); [ -n "$pv" ] || pv=8
+	wr 0x311b $(( ((12 - pv) << 4) | 0x09 )) ;;
+esac
+case "$bad" in *DAC*) wr $REG $((v | BIT)) ;; esac
+log "repaired:$bad -> 0x311c $(printf 0x%02x $(rd $REG)), 0x311b $(printf 0x%02x $(rd 0x311b))"
