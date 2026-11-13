@@ -46,11 +46,12 @@ if ! stage packages; then
 		sxmo-utils sway swaybg foot bemenu wvkbd lisgd fonts-jetbrains-mono xdg-user-dirs \
 		python3-gi python3-gi-cairo python3-cairo gir1.2-gtk-4.0 gir1.2-gtk4layershell-1.0 libgtk4-layer-shell0 \
 		polkit-kde-agent-1 xdg-desktop-portal xdg-desktop-portal-gtk dolphin breeze-icon-theme \
-		mobile-broadband-provider-info usbutils \
+		mobile-broadband-provider-info usbutils zam-plugins \
 		> /root/apt-base.log 2>&1 || { tail -8 /root/apt-base.log; exit 1; }
 		# the desktop: Sxmo on Sway (tools/linux/sxmo; Plasma Mobile until 2026-11-13). GTK4 + layer-shell: our
 		# overview, rotate button and menu scrim. polkit-kde-agent-1: password prompts (Discover); Dolphin: files;
-		# breeze icons for the Qt apps; the provider list: ModemManager / NM's mobile APNs
+		# breeze icons for the Qt apps; the provider list: ModemManager / NM's mobile APNs; zam-plugins: the limiter
+		# of the speaker tuning (pipewire.conf.d/60-duo-speaker-tuning.conf: EQ + about 8 dB make-up gain)
 	done_ packages
 fi
 

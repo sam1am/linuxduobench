@@ -8,6 +8,14 @@ swaymsg -q -- input "1118:3074:IPTSD_Virtual_Touchscreen_045E:0C02" map_to_outpu
 swaymsg -q -- input "1118:3073:IPTSD_Virtual_Touchscreen_045E:0C01" map_to_output $R
 swaymsg -q -- input "1118:3074:IPTSD_Virtual_Stylus_045E:0C02" map_to_output $L
 swaymsg -q -- input "1118:3073:IPTSD_Virtual_Stylus_045E:0C01" map_to_output $R
+# volume keys: straight to the volume (5 % a press, held = repeats; sxmo's bar shows it). sxmo binds them through
+# sxmo_multikey.sh (one/two/three presses), which breaks for good when pressed more than ~4 times quickly: its press
+# counter file is left behind and every later press fails ("shift: can't shift that many").
+for vol in ${SXMO_VOLUME_BUTTON:-"1:1:gpio-keys 0:0:pm8941_resin"}; do
+	swaymsg -q -- bindsym --locked --input-device="$vol" XF86AudioRaiseVolume exec sxmo_audio.sh vol up 5
+	swaymsg -q -- bindsym --locked --input-device="$vol" XF86AudioLowerVolume exec sxmo_audio.sh vol down 5
+done
+rm -f "$XDG_RUNTIME_DIR"/sxmo.multikey.count.vol*
 # sxmo scales only $SXMO_MONITOR; keep both panels the same
 swaymsg -q -- output $L scale 2.5
 swaymsg -q -- output $R scale 2.5

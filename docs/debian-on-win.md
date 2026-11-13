@@ -176,6 +176,11 @@ Everything below is installed by `make-debian-root.sh` (sensor packages from `to
   dropped, and DAPM never retries (always-complete path). `duo-speaker-dac` (boot + after resume) sets that bit when
   DAPM says on and the hardware says off. Checked with the phone's own mics: a 440 Hz tone went from -78 to -40 dBFS.
   The kernel fix (keep the amp resumed while bound) is still to do.
+- **Speaker quiet / volume keys dead (2026-11-13).** The speaker tuning (PipeWire filter-chain: high-pass, EQ, ZaMaximX2
+  limiter with about 8 dB make-up gain) was never active: its limiter comes from `zam-plugins`, which was not installed.
+  The amp itself stays at 0 dB PA gain, as on Android (its loudness comes from the DSP's MBDRC). The volume keys went
+  through sxmo's `sxmo_multikey.sh`, which fails for good after more than ~4 quick presses (its press counter file is
+  left behind); `duo-sway-init` binds them straight to `sxmo_audio.sh vol up/down 5` (held = repeat, with the bar).
 - **SDDM reads every file in `/etc/sddm.conf.d/`:** a backup kept there (`*.conf.plasma`) overrode the real
   autologin file. Keep backups elsewhere.
 - **Switching desktops from SSH:** restarting sddm ends only the compositor; the old session's systemd user units
