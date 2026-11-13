@@ -1,0 +1,43 @@
+#!/bin/sh
+# Surface Duo, Sxmo on Sway (experimental): a lisgd gesture made on screen OUT.  usage: duo-gesture OUT ACTION
+# One lisgd runs per touchscreen (sxmo_hook_lisgdstart.sh), so we know which screen a gesture came from. Focus that
+# screen first: then sxmo's own handler acts on that screen and not the other one. Every gesture is logged
+# (journalctl -t duo-gesture). Each screen shows one app at a time (duo-stack); the others are in its overview.
+#   swipe up from the bottom, left half         keyboard on this screen   } read by duo-sway-posture, not lisgd
+#   swipe up from the bottom, right half        overview of this screen   }  (lisgd cannot tell left from right)
+#   swipe down from the top                     Duo menu: open app, system, rotation, move / close this app
+#   short/medium swipe in from a side edge      universal back (duo-back: menu, keyboard, then the app)
+#   long swipe in from the left/right edge      previous/next app on this screen
+#   two-finger swipe towards the other screen   move this screen's app there (the only cross-screen action)
+#   two-finger swipe down at the bottom edge    close this screen's app
+#   one-finger along the top edge, left/right   this panel's brightness only
+#   swipe down at the bottom edge               hide the keyboard
+#   bottom-right corner                         rotation menu (auto / manual / semi-auto)
+out=$1 act=$2
+[ -n "$out" ] && [ -n "$act" ] || exit 1
+# folded: the screen facing away is off (duo-sway-posture), so a hand on its back must do nothing
+if [ "$(cat "$XDG_RUNTIME_DIR/duo-back-screen" 2> /dev/null)" = "$out" ]; then
+	logger -t duo-gesture "$out $act (ignored: screen is off, folded)"; exit 0
+fi
+logger -t duo-gesture "$out $act"
+swaymsg -q "focus output $out" 2> /dev/null
+
+# locked / screen off: only sxmo's handler knows what is allowed
+grep -q unlock "${SXMO_STATE:-$XDG_RUNTIME_DIR/sxmo.state}" 2> /dev/null || exec sxmo_hook_inputhandler.sh "$act"
+
+case "$act" in
+twoleft|tworight|twoup|twodown)
+	[ "two$(duo-screen towards "$out")" = "$act" ] && exec duo-screen moveapp "$out"
+	exit 0 ;;
+backleft|backright) exec duo-back "$out" ;;
+rightleftedge) exec duo-stack prev "$out" ;;
+leftrightedge) exec duo-stack next "$out" ;;
+twodownbottomedge) exec duo-stack close "$out" ;;
+righttopedge) exec duo-screen bright "$out" up ;;
+lefttopedge) exec duo-screen bright "$out" down ;;
+upbottomedge) exit 0 ;;   # duo-sway-posture: keyboard or overview, by where it started
+downbottomedge) exec duo-screen kbd "$out" close ;;
+downtopedge) sxmo_dmenu.sh isopen || exec duo-menu "$out"; exit 0 ;;
+bottomrightcorner) exec duo-rotation menu ;;
+esac
+exec sxmo_hook_inputhandler.sh "$act"

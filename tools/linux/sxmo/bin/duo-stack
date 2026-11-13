@@ -1,0 +1,277 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""duo-stack: one app at a time on each Duo screen; the others wait, hidden, until picked in the overview
+(Surface Duo, Sxmo on Sway, experimental, 2026-11-13).
+
+  duo-stack daemon           run for the session (started by ~/.config/sxmo/sway)
+  duo-stack show OUT ID      show app ID (a sway con_id) on screen OUT; the app there now is hidden
+  duo-stack next|prev OUT    the next/previous app of that screen (in the order they were opened)
+  duo-stack close OUT        close the app shown on OUT
+
+Each screen has one workspace (DSI-1: 1, DSI-2: 2) with exactly one tiled app on it. Every other app of that screen sits
+in sway's scratchpad, remembered as belonging to it. A new app takes the screen it opens on; closing the shown app
+brings back the one used before it; moving an app to the other screen hides the one there. Floating windows (dialogs)
+are left alone. State for the overview: $XDG_RUNTIME_DIR/duo-stack.json
+  {"order": {OUT: [ids in opening order]}, "mru": {OUT: [ids, most recent first]}, "shown": {OUT: id}}
+"""
+import json, os, socket, struct, sys, time
+
+LEFT, RIGHT = "DSI-1", "DSI-2"
+WS = {LEFT: "1", RIGHT: "2"}
+OUT_OF = {v: k for k, v in WS.items()}
+RUN = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+STATE, FIFO = os.path.join(RUN, "duo-stack.json"), os.path.join(RUN, "duo-stack.fifo")
+MAGIC, HDR = b"i3-ipc", struct.Struct("<6sII")
+RUN_COMMAND, SUBSCRIBE, GET_TREE = 0, 2, 4
+EV_WINDOW = 0x80000003
+
+
+def log(*a):
+    print("duo-stack:", *a, flush=True)
+
+
+class IPC:
+    def __init__(self):
+        path = os.environ.get("SWAYSOCK") or open(os.path.join(RUN, "sxmo.swaysock")).read().strip()
+        self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.s.connect(path)
+
+    def send(self, typ, payload=""):
+        b = payload.encode()
+        self.s.sendall(HDR.pack(MAGIC, len(b), typ) + b)
+
+    def recv(self):
+        h = self._read(HDR.size)
+        _, n, typ = HDR.unpack(h)
+        return typ, json.loads(self._read(n) or b"null")
+
+    def _read(self, n):
+        buf = b""
+        while len(buf) < n:
+            c = self.s.recv(n - len(buf))
+            if not c:
+                raise ConnectionError("sway closed the IPC socket")
+            buf += c
+        return buf
+
+    def call(self, typ, payload=""):
+        self.send(typ, payload)
+        return self.recv()[1]
+
+    def cmd(self, c):
+        r = self.call(RUN_COMMAND, c)
+        if not all(x.get("success") for x in r or []):
+            log("command failed:", c, r)
+        return r
+
+
+def windows(tree):
+    """every app window: id -> dict(out, ws, floating, focused, app, title)"""
+    res = {}
+
+    def walk(n, out, ws, floating):
+        if n.get("type") == "output":
+            out = n.get("name")
+        if n.get("type") == "workspace":
+            ws = n.get("name")
+        for c in n.get("nodes", []):
+            walk(c, out, ws, False)
+        for c in n.get("floating_nodes", []):
+            walk(c, out, ws, True)
+        if n.get("pid") is not None and not n.get("nodes"):
+            res[n["id"]] = dict(out=out, ws=ws, floating=floating, focused=n.get("focused", False),
+                                app=n.get("app_id") or (n.get("window_properties") or {}).get("class") or "?",
+                                title=n.get("name") or "")
+    walk(tree, None, None, False)
+    return res
+
+
+class Stack:
+    def __init__(self, ipc):
+        self.ipc = ipc
+        self.order = {LEFT: [], RIGHT: []}     # opening order (next/prev)
+        self.mru = {LEFT: [], RIGHT: []}       # most recently shown first
+        self.owner = {}                        # id -> output
+        self.load()
+
+    def load(self):
+        try:
+            with open(STATE) as f:
+                d = json.load(f)
+            for o in (LEFT, RIGHT):
+                self.order[o] = [int(i) for i in d["order"].get(o, [])]
+                self.mru[o] = [int(i) for i in d["mru"].get(o, [])]
+                for i in self.order[o]:
+                    self.owner[i] = o
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+
+    def save(self, wins):
+        shown = {o: next((i for i in self.mru[o] if i in wins and self.visible(wins[i], o)), None) for o in (LEFT, RIGHT)}
+        tmp = STATE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"order": self.order, "mru": self.mru, "shown": shown}, f)
+        os.replace(tmp, STATE)
+
+    @staticmethod
+    def visible(w, o):
+        return w["ws"] == WS[o] and not w["floating"]
+
+    def tree(self):
+        return windows(self.ipc.call(GET_TREE))
+
+    def adopt(self, i, o, front=True):
+        old = self.owner.get(i)
+        if old and old != o:
+            self.forget(i)
+        self.owner[i] = o
+        if i not in self.order[o]:
+            self.order[o].append(i)
+        if i in self.mru[o]:
+            self.mru[o].remove(i)
+        self.mru[o].insert(0 if front else len(self.mru[o]), i)
+
+    def forget(self, i):
+        o = self.owner.pop(i, None)
+        for d in (self.order, self.mru):
+            for lst in d.values():
+                if i in lst:
+                    lst.remove(i)
+        return o
+
+    def sync(self):
+        """bring the bookkeeping in line with sway, then make every screen show exactly one app"""
+        wins = self.tree()
+        for i in list(self.owner):
+            if i not in wins:
+                self.forget(i)
+        for i, w in wins.items():
+            if w["ws"] in OUT_OF and not w["floating"]:
+                o = OUT_OF[w["ws"]]
+                if self.owner.get(i) != o:
+                    self.adopt(i, o, front=w["focused"] or i not in self.owner)
+            elif w["ws"] == "__i3_scratch" and i not in self.owner:
+                self.adopt(i, LEFT, front=False)      # hidden before we knew it: give it to a screen
+        for o in (LEFT, RIGHT):
+            self.enforce(o, wins)
+        self.save(self.tree())
+
+    def enforce(self, o, wins):
+        tiled = [i for i, w in wins.items() if self.visible(w, o)]
+        if len(tiled) > 1:
+            keep = next((i for i in self.mru[o] if i in tiled), tiled[0])
+            for i in tiled:
+                if i != keep:
+                    self.ipc.cmd(f"[con_id={i}] move scratchpad")
+            log(o, "shows", keep, "hidden", [i for i in tiled if i != keep])
+        elif not tiled:
+            nxt = next((i for i in self.mru[o] if i in wins and wins[i]["ws"] == "__i3_scratch"), None)
+            if nxt:
+                self.bring(o, nxt, focus=False)
+                log(o, "empty: back to", nxt)
+
+    def bring(self, o, i, focus=True):
+        c = f"[con_id={i}] move container to workspace number {WS[o]}; [con_id={i}] floating disable"
+        if focus:
+            c += f"; [con_id={i}] focus"
+        self.ipc.cmd(c)
+
+    def show(self, o, i):
+        wins = self.tree()
+        if i not in wins:
+            return
+        self.adopt(i, o)
+        self.bring(o, i)
+        self.sync()
+
+    def step(self, o, d):
+        wins = self.tree()
+        lst = [i for i in self.order[o] if i in wins]
+        if len(lst) < 2:
+            return
+        cur = next((i for i in self.mru[o] if i in lst and self.visible(wins[i], o)), lst[0])
+        self.show(o, lst[(lst.index(cur) + d) % len(lst)])
+
+    def close(self, o):
+        wins = self.tree()
+        cur = next((i for i, w in wins.items() if self.visible(w, o)), None)
+        if cur:
+            self.ipc.cmd(f"[con_id={cur}] kill")
+
+    def on_window(self, ev):
+        change, con = ev.get("change"), ev.get("container") or {}
+        i = con.get("id")
+        if change in ("new", "focus") and i:
+            wins = self.tree()
+            w = wins.get(i)
+            if w and w["ws"] in OUT_OF and not w["floating"]:
+                self.adopt(i, OUT_OF[w["ws"]])
+        if change in ("new", "close", "move", "floating", "focus"):
+            self.sync()
+
+    def command(self, line):
+        v = line.split()
+        try:
+            if v[0] == "show" and len(v) == 3:
+                self.show(v[1], int(v[2]))
+            elif v[0] in ("next", "prev") and len(v) == 2:
+                self.step(v[1], 1 if v[0] == "next" else -1)
+            elif v[0] == "close" and len(v) == 2:
+                self.close(v[1])
+            elif v[0] == "sync":
+                self.sync()
+        except (ValueError, KeyError, IndexError) as e:
+            log("bad command", line, e)
+
+
+def daemon():
+    import select
+    ipc, ev = IPC(), IPC()
+    st = Stack(ipc)
+    # the screens' workspaces as plain containers (no tabs: one app at a time)
+    for o in (LEFT, RIGHT):
+        wins = st.tree()
+        for i, w in wins.items():
+            if st.visible(w, o):
+                ipc.cmd(f"[con_id={i}] layout splith")
+    st.sync()
+    ev.call(SUBSCRIBE, json.dumps(["window"]))
+    if not os.path.exists(FIFO):
+        os.mkfifo(FIFO, 0o600)
+    fifo = os.open(FIFO, os.O_RDWR | os.O_NONBLOCK)
+    fbuf = b""
+    log("ready", {o: st.order[o] for o in (LEFT, RIGHT)})
+    while True:
+        r, _, _ = select.select([ev.s, fifo], [], [])
+        if ev.s in r:
+            typ, data = ev.recv()
+            if typ == EV_WINDOW:
+                st.on_window(data)
+        if fifo in r:
+            try:
+                fbuf += os.read(fifo, 4096)
+            except BlockingIOError:
+                pass
+            while b"\n" in fbuf:
+                line, fbuf = fbuf.split(b"\n", 1)
+                st.command(line.decode(errors="replace"))
+
+
+def client(args):
+    if not os.path.exists(FIFO):
+        sys.exit("duo-stack is not running")
+    fd = os.open(FIFO, os.O_WRONLY | os.O_NONBLOCK)
+    os.write(fd, (" ".join(args) + "\n").encode())
+    os.close(fd)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["daemon"]:
+        try:
+            daemon()
+        except ConnectionError as e:
+            log(e); sys.exit(0)
+    elif len(sys.argv) > 1:
+        client(sys.argv[1:])
+    else:
+        print(__doc__); sys.exit(1)

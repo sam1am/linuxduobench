@@ -3,6 +3,29 @@
 This fork's changes on top of [brysonwf/linuxduobench](https://github.com/brysonwf/linuxduobench). Setup guide:
 [docs/debian-on-win.md](docs/debian-on-win.md). Safety rules: [CLAUDE.md](CLAUDE.md).
 
+## duo-debian-2026.11.13
+
+The desktop is now **Sxmo on Sway**, set up so the two screens work independently. Plasma Mobile is removed from the
+build: it used about 5 GB of RAM with a few apps open and its shell assumes one screen. No boot partition, partition
+table or lock state was written.
+
+### The new desktop (`tools/linux/sxmo/`)
+- Each screen has its own bar, workspace, touchscreen, gestures, keyboard and brightness; a gesture acts on the screen it was made on.
+- One app per screen, the rest in an overview (swipe up from the right half of the bottom): switch, close, bring an app over from the other screen; CPU, memory and storage at the bottom.
+- Gestures: Duo menu from the top, keyboard from the left half of the bottom, back from a short side-edge swipe, next/previous app from a long one, brightness along the top edge.
+- Rotation modes: auto, manual, and semi-auto (a small button confirms the rotation).
+- Folding back powers off the screen you touch and keeps its apps; the front screen is left alone.
+- Power key turns the screens on and off; idle turns them off after about 2 minutes; tapping outside a menu closes it.
+- On-screen keyboard: wvkbd with our patch (long-press numbers and symbols, a highlight that shows on fast taps, haptic clicks), built in the container by `make-wvkbd.sh`.
+- Minimal neon-on-black theme with JetBrains Mono and a horizon-grid wallpaper.
+
+### Removed
+- Plasma Mobile and its Duo pieces: the KWin `duo-posture`, `duo-kwin-outputs`, `duo-left-panels`, the KWin dual-screen script, the per-screen navigation bar patch, the maliit developer layout, `powerdevilrc`.
+- OpenSnitch (its pop-ups were hard to answer on the phone) and the KDE Settings, Konsole and Kate apps. Discover (Flatpak) and Dolphin stay.
+
+### Fixes
+- `duo-mtp` created `~/Downloads` and `~/Pictures` as root, so the user could not save into them.
+
 ## duo-debian-2026.11.12
 
 Debian 13 + Plasma Mobile installed on a second Surface Duo 1 (on the `win` partition, booted tethered), and the

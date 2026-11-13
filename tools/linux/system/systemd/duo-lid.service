@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Surface Duo: the hinge as a laptop lid switch (duo-lid); Plasma's power settings decide what closing does
+# Surface Duo: the hinge as a laptop lid switch (duo-lid); the desktop (sway) turns the screens off when it closes
 [Unit]
 Description=Surface Duo hinge as a laptop lid (screens off / sleep when closed)
 After=duo-sensors.service

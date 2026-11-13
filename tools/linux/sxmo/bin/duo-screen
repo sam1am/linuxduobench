@@ -1,0 +1,75 @@
+#!/bin/sh
+# Surface Duo, Sxmo on Sway (experimental): per-screen actions. Each screen has ONE workspace (left 1, right 2) and
+# shows one app at a time (duo-stack keeps the others). Every command takes the output it acts on first ("" = the focused one), so a gesture on one
+# screen never changes the other.
+#   duo-screen app OUT next|prev     switch to the next/previous app on that screen (duo-stack)
+#   duo-screen close OUT             close that screen's current app (duo-stack)
+#   duo-screen moveapp OUT           send that screen's current app to the other screen (and follow it)
+#   duo-screen towards OUT           print left/right/up/down: where the other screen lies, seen from OUT
+#   duo-screen bright OUT up|down    this panel's backlight only (via logind, like the desktop does)
+#   duo-screen kbd OUT open|close|toggle   on-screen keyboard on this screen (moves it here if it is on the other)
+L=DSI-1 R=DSI-2
+cmd=$1; out=$2
+[ $# -ge 2 ] && shift 2 || shift $#
+outs() { swaymsg -t get_outputs -r; }
+[ -n "$out" ] || out=$(outs | gojq -r '.[] | select(.focused) | .name')
+other() { [ "$1" = $L ] && echo $R || echo $L; }
+active() { outs | gojq -e -r --arg o "$1" '.[] | select(.name == $o and .active)' > /dev/null; }
+# the windows on OUT's visible workspace, in tab order (tiled, then floating)
+list() {
+	swaymsg -t get_tree -r | gojq -r --arg o "$1" '
+		.nodes[] | select(.name == $o) | .current_workspace as $cw | .nodes[] | select(.name == $cw) |
+		[.. | objects | select((.type == "con" or .type == "floating_con") and (.nodes | length) == 0 and .pid != null)] |
+		.[] | [.id, (if .focused then 1 else 0 end), (.app_id // .window_properties.class // "?"), (.name // "")] | @tsv'
+}
+# the app last focused on OUT (sway remembers one per workspace)
+current() {
+	swaymsg -q "focus output $1"
+	swaymsg -t get_tree -r | gojq -r '.. | objects | select(.focused == true and (.type == "con" or .type == "floating_con") and .pid != null) | .id' | head -n1
+}
+
+case "$cmd" in
+app) exec duo-stack "$1" "$out" ;;
+close) exec duo-stack close "$out" ;;
+moveapp)
+	o=$(other "$out")
+	active "$o" || exit 0
+	id=$(current "$out"); [ -n "$id" ] || exit 0
+	swaymsg -q "[con_id=$id] move container to output $o; [con_id=$id] focus" ;;
+towards)
+	outs | gojq -r --arg a "$out" --arg b "$(other "$out")" '
+		(map(select(.name == $a))[0].rect) as $p | (map(select(.name == $b and .active))[0].rect) as $q |
+		if $q == null then "none" else
+		(($q.x + $q.width / 2) - ($p.x + $p.width / 2)) as $dx | (($q.y + $q.height / 2) - ($p.y + $p.height / 2)) as $dy |
+		if ($dx | fabs) >= ($dy | fabs) then (if $dx > 0 then "right" else "left" end)
+		else (if $dy > 0 then "down" else "up" end) end end' ;;
+bright)
+	[ "$out" = $L ] && bl=ae94000.dsi.0 || bl=ae96000.dsi.0
+	d=/sys/class/backlight/$bl
+	max=$(cat $d/max_brightness); cur=$(cat $d/brightness); step=$((max / 12))
+	case "$1" in up) n=$((cur + step)) ;; down) n=$((cur - step)) ;; *) exit 1 ;; esac
+	[ $n -gt $max ] && n=$max; [ $n -lt $((max / 25)) ] && n=$((max / 25))
+	# logind accepts this from the owner of the session on the seat (the display session); callers such as lisgd
+	# (a user service) are in no session themselves, so name that session's object (id "37" -> .../session/_337)
+	sid=$(loginctl show-user "$(id -un)" -p Display --value)
+	[ -n "$sid" ] || exit 1
+	obj=/org/freedesktop/login1/session/$(printf %s "$sid" | sed 's/^\([0-9]\)/_3\1/')
+	busctl call org.freedesktop.login1 "$obj" org.freedesktop.login1.Session SetBrightness ssu backlight $bl $n ;;
+kbd)
+	st=$XDG_RUNTIME_DIR/duo-kbd-output
+	[ -r "$HOME/.config/duo/keyboard-args" ] && KEYBOARD_ARGS=$(cat "$HOME/.config/duo/keyboard-args") && export KEYBOARD_ARGS
+	swaymsg -q "focus output $out"
+	case "$1" in
+	close) sxmo_keyboard.sh close; rm -f "$st" ;;
+	open|toggle)
+		if sxmo_keyboard.sh isopen; then
+			if [ "$(cat "$st" 2>/dev/null)" = "$out" ]; then
+				[ "$1" = toggle ] && { sxmo_keyboard.sh close; rm -f "$st"; }
+				exit 0
+			fi
+			sxmo_keyboard.sh close; sleep 0.2      # it is on the other screen: bring it here
+		fi
+		echo "$out" > "$st"; sxmo_keyboard.sh open ;;
+	esac ;;
+*) sed -n '2,13p' "$0"; exit 1 ;;
+esac

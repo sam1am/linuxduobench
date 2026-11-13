@@ -3,7 +3,7 @@
 # Install the Surface Duo system layer (docs/research/workbench/generic-layout.md) into a root filesystem - any
 # distribution, systemd or OpenRC. Run it from a checkout (the files next to this script), on the phone or in a chroot
 # host:
-#   sh tools/linux/system/install.sh --init=systemd|openrc [--root=DIR] [--desktop=plasma|phosh|none] [--enable]
+#   sh tools/linux/system/install.sh --init=systemd|openrc [--root=DIR] [--desktop=sxmo|phosh|none] [--enable]
 # Installs: libexec/* + the charger guard + the speaker tuning tool -> /usr/libexec/duo; systemd units ->
 # /etc/systemd/system or OpenRC wrappers -> /etc/init.d; the desktop hook (phosh: phoc.ini layout) -> /usr/libexec/duo.
 # --enable also enables the services (systemctl --root / rc-update in a chroot). Packages, firmware and desktop
@@ -12,12 +12,12 @@ set -e
 D=$(cd "$(dirname "$0")" && pwd); ROOT=; INIT=; DESK=none; EN=0
 for a in "$@"; do case $a in
 	--init=*) INIT=${a#*=} ;; --root=*) ROOT=${a#*=} ;; --desktop=*) DESK=${a#*=} ;; --enable) EN=1 ;;
-	*) echo "usage: $0 --init=systemd|openrc [--root=DIR] [--desktop=plasma|phosh|none] [--enable]"; exit 1 ;;
+	*) echo "usage: $0 --init=systemd|openrc [--root=DIR] [--desktop=sxmo|phosh|none] [--enable]"; exit 1 ;;
 esac; done
 case $INIT in systemd|openrc) ;; *) echo "--init=systemd or --init=openrc"; exit 1 ;; esac
 ROOT=${ROOT%/}
 # services, in start order (gps-assist needs the duo-gps tool: enabled only when it is installed)
-SVC="duo-watchdog duo-bootanim duo-hw duo-bootanim-done duo-charger duo-modem duo-sensors duo-bt-addr duo-mtp duo-autobrightness duo-lid duo-kwin-outputs"
+SVC="duo-watchdog duo-bootanim duo-hw duo-bootanim-done duo-charger duo-modem duo-sensors duo-bt-addr duo-mtp duo-autobrightness duo-lid"
 
 # write a new file and rename it over the old one: never truncate a script that is running (sh reads scripts as it
 # goes - rewriting the live watchdog feeder in place could kill it, and a dead feeder = a watchdog reset)
@@ -38,7 +38,7 @@ if [ -f "$D/../bootanim/linuxduobench-icon.png" ]; then
 fi
 case $DESK in
 	phosh) put "$D/../desktop/phosh/duo-hw-desktop" /usr/libexec/duo/duo-hw-desktop 755 ;;
-	plasma|none) rm -f "$ROOT/usr/libexec/duo/duo-hw-desktop" ;;
+	sxmo|none) rm -f "$ROOT/usr/libexec/duo/duo-hw-desktop" ;;
 	*) echo "unknown --desktop=$DESK"; exit 1 ;;
 esac
 if [ $INIT = systemd ]; then

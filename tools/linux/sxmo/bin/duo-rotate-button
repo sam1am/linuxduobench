@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""duo-rotate-button OUTPUT CORNER TIMEOUT - the semi-auto rotation prompt (experimental, Sxmo on Sway, 2026-11-13).
+A small round button (neon ring, rotate arrow, a ring that runs down) in one corner (tl/tr/br/bl) of one screen, on
+top of everything, never taking keyboard focus. Exit 0 = tapped (rotate), 1 = timed out. Started by duo-sway-posture."""
+import glob, math, os, sys, time
+# gtk4-layer-shell must be loaded before libwayland-client
+_LS = next(iter(glob.glob("/usr/lib/*/libgtk4-layer-shell.so.0") + glob.glob("/usr/lib/libgtk4-layer-shell.so.0")), "")
+os.environ.setdefault("GTK_A11Y", "none")   # no accessibility bus here: skip looking for it
+if _LS and _LS not in os.environ.get("LD_PRELOAD", ""):
+    os.environ["LD_PRELOAD"] = (_LS + " " + os.environ.get("LD_PRELOAD", "")).strip()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+import gi
+gi.require_version("Gtk", "4.0"); gi.require_version("Gtk4LayerShell", "1.0")
+from gi.repository import Gtk, Gdk, GLib, Gtk4LayerShell as LS
+
+SIZE, MARGIN, BAR = 58, 14, 22
+CYAN, MAGENTA, BG = (0.0, 0.94, 1.0), (1.0, 0.16, 0.43), (0.027, 0.027, 0.05)
+
+
+def main():
+    out, corner = sys.argv[1], sys.argv[2]
+    timeout = float(sys.argv[3]) if len(sys.argv) > 3 else 6.0
+    t0, rc = time.monotonic(), [1]
+    loop = GLib.MainLoop()
+
+    win = Gtk.Window()
+    LS.init_for_window(win)
+    LS.set_layer(win, LS.Layer.OVERLAY)
+    LS.set_namespace(win, "duo-rotate-button")
+    LS.set_keyboard_mode(win, LS.KeyboardMode.NONE)
+    for m in Gdk.Display.get_default().get_monitors():
+        if m.get_connector() == out:
+            LS.set_monitor(win, m)
+    LS.set_anchor(win, LS.Edge.TOP if corner[0] == "t" else LS.Edge.BOTTOM, True)
+    LS.set_anchor(win, LS.Edge.LEFT if corner[1] == "l" else LS.Edge.RIGHT, True)
+    for e in (LS.Edge.TOP, LS.Edge.BOTTOM, LS.Edge.LEFT, LS.Edge.RIGHT):
+        LS.set_margin(win, e, MARGIN + (BAR if e == LS.Edge.TOP else 0))
+    css = Gtk.CssProvider()
+    css.load_from_data(b"window { background: transparent; }")
+    Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    area = Gtk.DrawingArea()
+    area.set_content_width(SIZE); area.set_content_height(SIZE)
+
+    def draw(_a, cr, w, h):
+        cx, cy, r = w / 2, h / 2, min(w, h) / 2 - 3
+        left = max(0.0, 1 - (time.monotonic() - t0) / timeout)
+        for width, alpha in ((7, 0.10), (4, 0.22)):        # glow
+            cr.set_source_rgba(*CYAN, alpha); cr.set_line_width(width)
+            cr.arc(cx, cy, r, 0, 2 * math.pi); cr.stroke()
+        cr.set_source_rgba(*BG, 0.88); cr.arc(cx, cy, r - 1, 0, 2 * math.pi); cr.fill()
+        cr.set_source_rgba(*CYAN, 0.9); cr.set_line_width(1.5)
+        cr.arc(cx, cy, r, 0, 2 * math.pi); cr.stroke()
+        # countdown: a magenta ring that runs down clockwise from the top
+        cr.set_source_rgba(*MAGENTA, 0.95); cr.set_line_width(2.5)
+        cr.arc(cx, cy, r - 4, -math.pi / 2, -math.pi / 2 + 2 * math.pi * left); cr.stroke()
+        # rotate arrow: 3/4 circle + head
+        ar = r * 0.42
+        a0, a1 = math.radians(-60), math.radians(210)
+        cr.set_source_rgba(*CYAN, 1.0); cr.set_line_width(2.4); cr.set_line_cap(1)
+        cr.arc(cx, cy, ar, a0, a1); cr.stroke()
+        hx, hy = cx + ar * math.cos(a0), cy + ar * math.sin(a0)
+        hl = r * 0.22
+        for da in (math.radians(-30), math.radians(-120)):
+            cr.move_to(hx, hy); cr.line_to(hx + hl * math.cos(a0 + da), hy + hl * math.sin(a0 + da))
+        cr.stroke()
+    area.set_draw_func(draw)
+
+    def done(code):
+        rc[0] = code; loop.quit()
+    click = Gtk.GestureClick()
+    click.connect("released", lambda *_: done(0))
+    area.add_controller(click)
+    win.set_child(area)
+
+    def tick():
+        if time.monotonic() - t0 >= timeout:
+            done(1); return False
+        area.queue_draw(); return True
+    GLib.timeout_add(40, tick)
+    win.present()
+    loop.run()
+    sys.exit(rc[0])
+
+
+if __name__ == "__main__":
+    main()

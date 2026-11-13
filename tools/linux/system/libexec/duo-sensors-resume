@@ -9,7 +9,7 @@
 #  pre : stop duo-sensors = stop hexagonrpcd only (the SLPI keeps running without it, just without file access -
 #        docs/drivers/sensors.md; Debian's own hexagonrpcd-suspend/-resume units do the same on SDM670)
 #  post: if the SLPI crashed anyway: one recovery; then start duo-sensors again (+ iio-sensor-proxy after a crash).
-#        In the background, so resume is not held up. duo-lid and duo-posture re-open their hinge readers themselves.
+#        In the background, so resume is not held up. duo-lid and duo-sway-posture re-open their hinge readers themselves.
 slpi() { for r in /sys/class/remoteproc/remoteproc*; do [ "$(cat $r/name 2>/dev/null)" = slpi ] && echo $r; done; }
 post() {
 	R=$(slpi); crashed=0
@@ -26,8 +26,8 @@ post() {
 	systemctl start duo-sensors
 	if [ $crashed = 1 ]; then
 		systemctl restart iio-sensor-proxy
-		# hinge readers opened before the SLPI restart stay connected but never get another reading (duo-posture
-		# then kept "180 deg" with the phone closed): end them, duo-lid and duo-posture start new ones
+		# hinge readers opened before the SLPI restart stay connected but never get another reading (the posture daemon
+		# then kept "180 deg" with the phone closed): end them, duo-lid and duo-sway-posture start new ones
 		pkill -x duo-ssc-read
 	fi
 	echo "duo-sensors-resume: SLPI $(cat $R/state 2>/dev/null), sensors up (crash: $crashed)" > /dev/kmsg

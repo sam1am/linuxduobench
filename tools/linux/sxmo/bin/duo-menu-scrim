@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""duo-menu-scrim: tap outside a sxmo menu to close it (Surface Duo, Sxmo trial, 2026-11-13).
+Runs for the whole session (started by ~/.config/sxmo/sway). The sxmo_dmenu.sh wrapper (~/.config/sxmo/hooks) writes
+"show" to $XDG_RUNTIME_DIR/duo-scrim.fifo before it starts bemenu and "hide" after it ends. On "show" a dim layer
+covers the focused screen; once it is on screen this creates duo-scrim.shown, and only then the wrapper starts bemenu,
+so the menu is mapped later and lies above the dim layer (same layer-shell layer: later = on top). A tap on the dim
+layer closes the menu (sxmo_dmenu.sh close). Shows nest (menus that open menus): visible while shows > hides."""
+import glob, json, os, subprocess, sys
+_LS = next(iter(glob.glob("/usr/lib/*/libgtk4-layer-shell.so.0") + glob.glob("/usr/lib/libgtk4-layer-shell.so.0")), "")
+os.environ.setdefault("GTK_A11Y", "none")   # no accessibility bus here: skip looking for it
+if _LS and _LS not in os.environ.get("LD_PRELOAD", ""):
+    os.environ["LD_PRELOAD"] = (_LS + " " + os.environ.get("LD_PRELOAD", "")).strip()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+import gi
+gi.require_version("Gtk", "4.0"); gi.require_version("Gtk4LayerShell", "1.0")
+from gi.repository import Gtk, Gdk, GLib, Gtk4LayerShell as LS
+
+TINT = (0.012, 0.012, 0.03, 0.55)
+RUN = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+FIFO, SHOWN = os.path.join(RUN, "duo-scrim.fifo"), os.path.join(RUN, "duo-scrim.shown")
+
+
+def log(*a):
+    print("duo-menu-scrim:", *a, flush=True)
+
+
+class Scrim:
+    def __init__(self):
+        self.win, self.depth = None, 0
+
+    def focused_monitor(self):
+        try:
+            outs = json.loads(subprocess.run(["swaymsg", "-t", "get_outputs", "-r"], capture_output=True, text=True,
+                                             timeout=3).stdout)
+            name = next(o["name"] for o in outs if o.get("focused"))
+        except (ValueError, StopIteration, subprocess.SubprocessError):
+            return None
+        for m in Gdk.Display.get_default().get_monitors():
+            if m.get_connector() == name:
+                return m
+        return None
+
+    def shown(self):
+        try:
+            open(SHOWN, "w").close()
+        except OSError:
+            pass
+        return False
+
+    def show(self):
+        self.depth += 1
+        if self.win:
+            self.shown(); return
+        win = Gtk.Window()
+        LS.init_for_window(win)
+        LS.set_layer(win, LS.Layer.TOP)
+        LS.set_namespace(win, "duo-menu-scrim")
+        LS.set_keyboard_mode(win, LS.KeyboardMode.NONE)     # the menu keeps the keyboard
+        LS.set_exclusive_zone(win, -1)                      # over the bar too
+        mon = self.focused_monitor()
+        if mon:
+            LS.set_monitor(win, mon)
+        for e in (LS.Edge.TOP, LS.Edge.BOTTOM, LS.Edge.LEFT, LS.Edge.RIGHT):
+            LS.set_anchor(win, e, True)
+        area = Gtk.DrawingArea()
+        area.set_hexpand(True); area.set_vexpand(True)
+        area.set_draw_func(lambda _a, cr, w, h: (cr.set_source_rgba(*TINT), cr.paint()))
+        tap = Gtk.GestureClick()
+        tap.connect("released", lambda *_: self.tapped())
+        area.add_controller(tap)
+        win.set_child(area)
+        win.connect("map", lambda *_: GLib.timeout_add(40, self.shown))   # a frame later: committed to sway
+        win.present()
+        self.win = win
+
+    def hide(self, all_=False):
+        self.depth = 0 if all_ else max(0, self.depth - 1)
+        if self.win and self.depth == 0:
+            self.win.destroy()
+            self.win = None
+
+    def tapped(self):
+        log("tap outside the menu: close it")
+        subprocess.Popen(["sxmo_dmenu.sh", "close"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.hide(all_=True)
+
+
+def main():
+    css = Gtk.CssProvider()
+    css.load_from_data(b"window { background: transparent; }")
+    Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    scrim = Scrim()
+    if not os.path.exists(FIFO):
+        os.mkfifo(FIFO, 0o600)
+    fd = os.open(FIFO, os.O_RDWR | os.O_NONBLOCK)
+    buf = [b""]
+
+    def on_cmd(_fd, _cond):
+        try:
+            buf[0] += os.read(fd, 4096)
+        except BlockingIOError:
+            return True
+        while b"\n" in buf[0]:
+            line, buf[0] = buf[0].split(b"\n", 1)
+            c = line.decode(errors="replace").strip()
+            if c == "show":
+                scrim.show()
+            elif c == "hide":
+                scrim.hide()
+        return True
+    GLib.io_add_watch(fd, GLib.IO_IN, on_cmd)
+    log("ready")
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    main()

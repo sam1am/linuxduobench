@@ -1,0 +1,40 @@
+#!/bin/sh
+# configversion: 6eea46448f82f12a04d79fafc45d6fb0
+
+# shellcheck source=scripts/core/sxmo_common.sh
+. sxmo_common.sh
+
+# Surface Duo 1, Sxmo on Sway (experimental, 2026-11-13). Based on /usr/share/sxmo/appcfg/profile_template.
+# All processes launched here must be non-blocking.
+
+# Browser: Chromium (no Firefox on this image)
+command -v chromium > /dev/null && export BROWSER=chromium
+
+# ---- look: minimal neon on black (the same palette as ~/.config/sxmo/sway)
+# bg #07070d  panel #0d0e1a  line #1c1f36  dim #5d6b8a  text #d7e3ff  cyan #00f0ff  magenta #ff2a6d
+export BEMENU_OPTS="--fn 'JetBrains Mono Bold 11' --scrollbar autohide -s -n -w -c -l12 -W 0.92 -M 0 -H 30 -B 1 \
+--bdr '#00f0ff' \
+--tb '#07070d' --tf '#ff2a6d' \
+--fb '#07070d' --ff '#00f0ff' \
+--cb '#07070d' --cf '#00f0ff' \
+--nb '#07070d' --nf '#8fa0c4' \
+--ab '#0d0e1a' --af '#8fa0c4' \
+--hb '#00f0ff' --hf '#07070d' \
+--fbb '#00f0ff' --fbf '#07070d' \
+--sb '#ff2a6d' --sf '#07070d' \
+--scb '#0d0e1a' --scf '#ff2a6d'"
+
+# on-screen keyboard (wvkbd): its look and size live in ~/.config/duo/keyboard-args (read again by duo-screen each
+# time it opens the keyboard). Heights in logical px (the screen is 540x720): portrait 250, landscape 210 of 540
+export KEYBOARD_ARGS="$(cat "$HOME/.config/duo/keyboard-args" 2> /dev/null)"
+
+# screen off after about 2 minutes untouched: sxmo locks (screen on, touch off) after this many seconds, and turns the
+# screen off 8 s later
+export SXMO_UNLOCK_IDLE_TIME=112
+
+#Set RINGTONE to audio file to play for incoming call
+export SXMO_RINGTONE="$(xdg_data_path sxmo/ring.ogg)"
+#Set TEXTSOUND to audio file to play when received text message
+export SXMO_TEXTSOUND="$(xdg_data_path sxmo/notify.ogg)"
+export SXMO_RINGTIME=20
+export SXMO_RINGNUMER=10

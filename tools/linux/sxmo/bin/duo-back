@@ -1,0 +1,25 @@
+#!/bin/sh
+# Surface Duo, Sxmo on Sway (experimental): universal back on screen OUT (a short swipe in from the left or right edge,
+# as on Android). Closes the top-most thing on that screen, in order:
+#   the overview  ->  an open menu  ->  the on-screen keyboard (if it is on this screen)  ->  "back" in the app
+# App back: Alt+Left (the standard Back shortcut) in browsers and KDE/Qt apps, Esc everywhere else.
+out=${1:-$(swaymsg -t get_outputs -r | gojq -r '.[] | select(.focused) | .name')}
+swaymsg -q "focus output $out"
+# the overview of this screen: close it
+if [ -e "$XDG_RUNTIME_DIR/duo-overview.pid" ] && [ "$(cut -d' ' -f2 "$XDG_RUNTIME_DIR/duo-overview.pid")" = "$out" ]; then
+	exec duo-overview "$out"      # started again on the same screen = close
+fi
+if sxmo_dmenu.sh isopen; then
+	exec sxmo_dmenu.sh close
+fi
+if sxmo_keyboard.sh isopen && [ "$(cat "$XDG_RUNTIME_DIR/duo-kbd-output" 2> /dev/null)" = "$out" ]; then
+	exec duo-screen kbd "$out" close
+fi
+app=$(swaymsg -t get_tree -r | gojq -r '.. | objects | select(.focused == true and (.type == "con" or .type == "floating_con"))
+	| (.app_id // .window_properties.class // "")' | head -n1 | tr '[:upper:]' '[:lower:]')
+[ -n "$app" ] || exit 0
+case "$app" in
+	*chromium*|*chrome*|*firefox*|*epiphany*|org.kde.*|*dolphin*|*discover*|*okular*|*gwenview*|*localsend*)
+		exec sxmo_type.sh -M Alt -k Left ;;
+	*) exec sxmo_type.sh -k Escape ;;
+esac

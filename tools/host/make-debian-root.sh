@@ -43,15 +43,14 @@ if ! stage packages; then
 		sudo openssh-server network-manager python3 e2fsprogs util-linux-extra mount procps iputils-ping less nano curl \
 		gnupg dbus-user-session polkitd rtkit upower udisks2 \
 		pipewire-audio pipewire-pulse wireplumber alsa-utils xwayland fonts-noto-core fonts-noto-color-emoji \
-		plasma-mobile plasma-mobile-tweaks plasma-workspace kwin-wayland plasma-nm plasma-pa powerdevil \
-		konsole dolphin kate qml6-module-qtquick-virtualkeyboard maliit-keyboard xdg-user-dirs \
-		qml6-module-org-kde-kirigamiaddons-formcard qml6-module-org-kde-kirigamiaddons-components \
-		qml6-module-org-kde-kirigamiaddons-delegates qml6-module-org-kde-kirigamiaddons-labs-components \
-		qml6-module-org-kde-kirigamiaddons-settings qml6-module-org-kde-kirigamiaddons-datetime \
-		qml6-module-qt-labs-platform qt6-svg-plugins qt6-image-formats-plugins kimageformat6-plugins \
+		sxmo-utils sway swaybg foot bemenu wvkbd lisgd fonts-jetbrains-mono xdg-user-dirs \
+		python3-gi python3-gi-cairo python3-cairo gir1.2-gtk-4.0 gir1.2-gtk4layershell-1.0 libgtk4-layer-shell0 \
+		polkit-kde-agent-1 xdg-desktop-portal xdg-desktop-portal-gtk dolphin breeze-icon-theme \
+		mobile-broadband-provider-info usbutils \
 		> /root/apt-base.log 2>&1 || { tail -8 /root/apt-base.log; exit 1; }
-		# (Debian's plasma-mobile does not depend on the Kirigami Addons modules its home screen imports, and with
-		#  --no-install-recommends Qt has no SVG decoder: without these the shell shows only "Type ... unavailable")
+		# the desktop: Sxmo on Sway (tools/linux/sxmo; Plasma Mobile until 2026-11-13). GTK4 + layer-shell: our
+		# overview, rotate button and menu scrim. polkit-kde-agent-1: password prompts (Discover); Dolphin: files;
+		# breeze icons for the Qt apps; the provider list: ModemManager / NM's mobile APNs
 	done_ packages
 fi
 
@@ -83,9 +82,9 @@ if ! stage duo; then
 	# the files of duo-files.list + the system layer
 	grep -v '^#' $L/debian/duo-files.list | while IFS=: read s d; do [ -n "$s" ] || continue
 		mkdir -p "$R/$(dirname "$d")"; tr -d '\r' < "$L/$s" > "$R/$d"; case $d in usr/local/sbin/*) chmod 755 "$R/$d";; esac; done
-	sh $L/system/install.sh --init=systemd --root=$R --desktop=plasma
+	sh $L/system/install.sh --init=systemd --root=$R --desktop=sxmo
 	# inputs duo-debian-setup.sh takes from /tmp
-	cp $L/debian/opensnitch-rules.sh $L/debian/waydroid-nft.conf $L/modem/duo-gps.c $R/tmp/
+	cp $L/debian/waydroid-nft.conf $L/modem/duo-gps.c $R/tmp/
 	tr -d '\r' < $L/debian/duo-debian-setup.sh > $R/tmp/duo-debian-setup.sh
 	chroot $R dpkg --force-confdef --force-confold --configure -a > /dev/null 2>&1 || true
 	chroot $R sh /tmp/duo-debian-setup.sh 2>&1 | tee /root/duo-setup.log | tail -15
@@ -110,7 +109,7 @@ if ! stage fork; then
 	if [ -x /root/iptsd-out/iptsd ]; then mkdir -p $R/opt/duo/bin; cp /root/iptsd-out/iptsd* $R/opt/duo/bin/; echo "iptsd: installed"
 	else echo "WARNING: no /root/iptsd-out/iptsd - touch will not work until it is added"; fi
 	# sensors (make-sensor-debs.sh): libssc + iio-sensor-proxy with SSC support (held: trixie's own has none) and the
-	# hinge/posture reader; then the two-screen layer: duo-posture (user unit) and the KWin dual-screen script
+	# hinge/posture reader (duo-sway-posture reads both)
 	S=/root/sensor-debs
 	if [ -f $S/duo-ssc-read ] && ls $S/libssc2_*.deb > /dev/null 2>&1; then
 		mkdir -p $R/tmp/sd; cp $S/*.deb $R/tmp/sd/
@@ -118,22 +117,13 @@ if ! stage fork; then
 			apt-mark hold libssc2 libssc-bin iio-sensor-proxy > /dev/null' || { echo "sensor packages failed"; exit 1; }
 		install -m755 $S/duo-ssc-read $R/usr/local/bin/duo-ssc-read; echo "sensors: libssc + iio-sensor-proxy (SSC) + duo-ssc-read"
 	else echo "WARNING: no $S (make-sensor-debs.sh) - no rotation, hinge or light sensor on the desktop"; fi
-	for u in duo-posture duo-left-panels; do
-		install -D -m644 $L/debian/$u.service $R/usr/lib/systemd/user/$u.service
-		chroot $R systemctl --global enable $u.service > /dev/null 2>&1
-	done
-	rm -rf $R/usr/share/kwin/scripts/duo-dualscreen; mkdir -p $R/usr/share/kwin/scripts
-	cp -r $L/debian/kwin-duo-dualscreen $R/usr/share/kwin/scripts/duo-dualscreen
-	find $R/usr/share/kwin/scripts/duo-dualscreen -name '._*' -delete
-	printf '[Plugins]\nduo-dualscreenEnabled=true\n' > $R/etc/xdg/kwinrc
 	ln -sf /usr/libexec/duo/duo-reset $R/usr/local/sbin/duo-reset
-	# developer keyboard: Esc/Tab/Ctrl/Alt/arrows row + programming symbols on long press (maliit, diverted layout)
-	ROOT=$R sh $L/debian/maliit-dev/install.sh
-	# each screen's navigation bar closes the app on its own screen
-	ROOT=$R sh $L/debian/plasma-mobile-perscreen/install.sh
-	# closing the phone = a laptop lid (duo-lid, enabled by install.sh): Plasma turns the screens off, logind ignores it
+	# the desktop: Sxmo on Sway for two independent screens (tools/linux/sxmo): one app per screen + overview,
+	# per-screen gestures and keyboard, rotation modes, fold. The keyboard is wvkbd with our patch when built first
+	# (tools/linux/sxmo/wvkbd/make-wvkbd.sh -> /root/wvkbd-out).
+	ROOT=$R WVKBD=/root/wvkbd-out/wvkbd-mobintl sh $L/sxmo/install.sh
+	# closing the phone = a laptop lid (duo-lid, enabled by install.sh): sway turns the screens off, logind ignores it
 	install -D -m644 $L/debian/50-duo-lid.conf $R/etc/systemd/logind.conf.d/50-duo-lid.conf
-	install -D -m644 $L/debian/powerdevilrc $R/etc/xdg/powerdevilrc
 	# s2idle: hexagonrpcd stopped before, the SLPI recovered (if needed) and the sensors restarted after
 	mkdir -p $R/usr/lib/systemd/system-sleep
 	ln -sf /usr/libexec/duo/duo-sensors-resume $R/usr/lib/systemd/system-sleep/duo-sensors
@@ -146,16 +136,12 @@ if ! stage fork; then
 	chroot $R dpkg-divert --quiet --local --rename --divert $D/discover-disabled/packagekit-backend.so \
 		--add $D/discover/packagekit-backend.so
 	chroot $R flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-	# hingeboard (tools/linux/hingeboard): the laptop keyboard on the lower screen when the screens are stacked
-	chroot $R apt-get -q -y --no-install-recommends install python3-gi python3-gi-cairo python3-cairo python3-evdev \
-		gir1.2-gtk-4.0 gir1.2-gtk4layershell-1.0 libgtk4-layer-shell0 > /dev/null 2>&1 || { echo "hingeboard packages failed"; exit 1; }
-	for f in hingeboard hingeboard-dictate.py; do install -m755 $L/hingeboard/$f $R/usr/local/bin/$f; done
-	echo 'KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
-		> $R/etc/udev/rules.d/70-hingeboard-uinput.rules
 	# SSH: keys only; root for service work, `user` for the desktop
 	mkdir -p $R/root/.ssh $R/home/user/.ssh; cp "$KEYS" $R/root/.ssh/authorized_keys; cp "$KEYS" $R/home/user/.ssh/authorized_keys
 	chmod 700 $R/root/.ssh $R/home/user/.ssh; chmod 600 $R/root/.ssh/authorized_keys $R/home/user/.ssh/authorized_keys
 	chroot $R chown -R user:user /home/user
+	# (the folders sxmo's start hook makes as root would stay root-owned: make them here, as the user's)
+	chroot $R install -d -o user -g user /home/user/Downloads /home/user/Pictures
 	mkdir -p $R/etc/ssh/sshd_config.d
 	printf 'PasswordAuthentication no\nPermitRootLogin prohibit-password\n' > $R/etc/ssh/sshd_config.d/10-duo.conf
 	echo 'user ALL=(ALL) NOPASSWD: ALL' > $R/etc/sudoers.d/duo-user; chmod 440 $R/etc/sudoers.d/duo-user

@@ -1,0 +1,480 @@
+diff -ruN -x *.o -x proto -x wvkbd-mobintl -x debian -x config.h -x .pc -x Makefile -x config.mk orig/wvkbd-0.15/duo.c wvkbd-0.15/duo.c
+--- orig/wvkbd-0.15/duo.c	1969-12-31 17:00:00
++++ wvkbd-0.15/duo.c	2026-11-13 14:04:18
+@@ -0,0 +1,324 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later */
++/* Surface Duo additions to wvkbd 0.15 (experimental, 2026-11-13):
++ *  - long-press alternates: each letter has a second character (a number or symbol, shown small in its top right
++ *    corner). Hold the key DUO_LP_MS and it changes to that character; lift to type it. Keys with an alternate are
++ *    typed on lift (as on Android), all others still on touch-down (so backspace & co. still repeat).
++ *  - a pressed key stays lit at least DUO_HL_MS, so even a 6 ms tap shows (they were drawn and cleared within one
++ *    frame before).
++ *  - haptics: a short buzz from the Duo's da7280 motor on every press, a second one when a long press turns into
++ *    its alternate. Every start is followed by a stop: the driver plays until told to stop, and stretches a
++ *    short effect to its min_play_ms / min_rumble_pct.
++ */
++#include <fcntl.h>
++#include <glob.h>
++#include <linux/input.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <sys/timerfd.h>
++#include <time.h>
++#include <unistd.h>
++
++#include "proto/virtual-keyboard-unstable-v1-client-protocol.h"
++#include "keyboard.h"
++
++#define DUO_LP_MS 350
++#define DUO_HL_MS 90
++#define DUO_BUZZ_MS 12
++#define DUO_BUZZ_LONG_MS 24
++
++static const struct { const char *key; const char *alt; uint32_t code; } duo_alts[] = {
++	{"q", "1", 0x31}, {"w", "2", 0x32}, {"e", "3", 0x33}, {"r", "4", 0x34}, {"t", "5", 0x35},
++	{"y", "6", 0x36}, {"u", "7", 0x37}, {"i", "8", 0x38}, {"o", "9", 0x39}, {"p", "0", 0x30},
++	{"a", "@", 0x40}, {"s", "#", 0x23}, {"d", "$", 0x24}, {"f", "%", 0x25}, {"g", "&", 0x26},
++	{"h", "-", 0x2d}, {"j", "+", 0x2b}, {"k", "(", 0x28}, {"l", ")", 0x29},
++	{"z", "*", 0x2a}, {"x", "\"", 0x22}, {"c", "'", 0x27}, {"v", ":", 0x3a}, {"b", ";", 0x3b},
++	{"n", "!", 0x21}, {"m", "?", 0x3f},
++};
++
++static int ff_fd = -1, ff_id = -1, ff_long_id = -1;
++static PangoFontDescription *hint_font;
++
++static double
++now_ms(void)
++{
++	struct timespec t;
++	clock_gettime(CLOCK_MONOTONIC, &t);
++	return t.tv_sec * 1000.0 + t.tv_nsec / 1e6;
++}
++
++static void
++arm(int fd, int ms)
++{
++	struct itimerspec it = {0};
++	it.it_value.tv_sec = ms / 1000;
++	it.it_value.tv_nsec = (ms % 1000) * 1000000L;
++	if (fd >= 0)
++		timerfd_settime(fd, 0, &it, NULL);
++}
++
++static int
++ff_upload(int ms, int strength)
++{
++	struct ff_effect e = {0};
++	e.type = FF_RUMBLE;
++	e.id = -1;
++	e.u.rumble.strong_magnitude = strength;
++	e.replay.length = ms;
++	if (ioctl(ff_fd, EVIOCSFF, &e) < 0)
++		return -1;
++	return e.id;
++}
++
++void
++duo_init(struct kbd *kb)
++{
++	kb->duo_lp_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
++	kb->duo_hl_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
++	glob_t g;
++	if (glob("/dev/input/event*", 0, NULL, &g) == 0) {
++		for (size_t i = 0; i < g.gl_pathc && ff_fd < 0; i++) {
++			int fd = open(g.gl_pathv[i], O_RDWR | O_CLOEXEC);
++			char name[64] = "";
++			if (fd < 0)
++				continue;
++			ioctl(fd, EVIOCGNAME(sizeof(name)), name);
++			if (strstr(name, "da7280"))
++				ff_fd = fd;
++			else
++				close(fd);
++		}
++		globfree(&g);
++	}
++	if (ff_fd >= 0) {
++		ff_id = ff_upload(DUO_BUZZ_MS, 0x5000);
++		ff_long_id = ff_upload(DUO_BUZZ_LONG_MS, 0x9000);
++	}
++	if (kb->debug)
++		fprintf(stderr, "duo: haptics %s\n", ff_fd >= 0 ? "on" : "not found");
++}
++
++static void
++buzz(int id)
++{
++	if (ff_fd < 0 || id < 0)
++		return;
++	/* start, then stop at once: this driver never ends an effect by itself (it plays until told to stop); the
++	 * stop is deferred by the driver until the effect has played min_play_ms (kernel patch 0091), which makes
++	 * the click */
++	struct input_event ev[2] = {0};
++	ev[0].type = ev[1].type = EV_FF;
++	ev[0].code = ev[1].code = id;
++	ev[0].value = 1;
++	ev[1].value = 0;
++	if (write(ff_fd, ev, sizeof(ev)) < 0) {
++		/* motor gone: stay quiet */
++	}
++}
++
++void
++duo_buzz_press(void)
++{
++	buzz(ff_id);
++}
++
++const struct key *duo_hl_key_ptr(struct kbd *kb) { return kb->duo_hl_key; }
++
++static int
++alt_index(const struct key *k)
++{
++	if (!k || k->type != Code || !k->label || k->label[0] == 0 || k->label[1] != 0)
++		return -1;
++	for (size_t i = 0; i < sizeof(duo_alts) / sizeof(duo_alts[0]); i++)
++		if (strcmp(k->label, duo_alts[i].key) == 0)
++			return (int)i;
++	return -1;
++}
++
++const char *
++duo_alt_label(const struct key *k)
++{
++	int i = alt_index(k);
++	return i < 0 ? NULL : duo_alts[i].alt;
++}
++
++/* the hint: the alternate, small, in the key's top right corner */
++void
++duo_draw_hint(struct kbd *kb, struct key *k)
++{
++	const char *alt = duo_alt_label(k);
++	if (!alt)
++		return;
++	struct clr_scheme *sc = &kb->schemes[k->scheme];
++	if (!hint_font && sc->font_description) {
++		hint_font = pango_font_description_copy(sc->font_description);
++		int sz = pango_font_description_get_size(hint_font);
++		bool abs = pango_font_description_get_size_is_absolute(hint_font);
++		if (sz > 0) {
++			if (abs)
++				pango_font_description_set_absolute_size(hint_font, sz * 0.5);
++			else
++				pango_font_description_set_size(hint_font, sz * 0.5);
++		}
++	}
++	if (!hint_font)
++		return;
++	uint32_t w = k->w / 3, h = k->h / 3;
++	drw_draw_text(kb->surf, kb->schemes[1].text, k->x + k->w - w - 2, k->y + 2, w, h, 0, alt, hint_font);
++}
++
++/* ---- highlight that lasts ---- */
++void
++duo_hl_start(struct kbd *kb, struct key *k)
++{
++	kb->duo_hl_key = k;
++	kb->duo_hl_since = now_ms();
++	kb->duo_hl_pending = false;
++}
++
++/* an Unpress draw of the highlighted key: true = not yet (the timer will draw it) */
++bool
++duo_hl_hold(struct kbd *kb, struct key *k)
++{
++	if (k != kb->duo_hl_key)
++		return false;
++	double left = DUO_HL_MS - (now_ms() - kb->duo_hl_since);
++	if (left <= 1 && !kb->duo_hl_pending)
++		return false;
++	if (!kb->duo_hl_pending) {
++		kb->duo_hl_pending = true;
++		arm(kb->duo_hl_fd, (int)left);
++	}
++	return true;
++}
++
++bool
++duo_hl_pending(struct kbd *kb)
++{
++	return kb->duo_hl_pending;
++}
++
++static void
++hl_finish(struct kbd *kb)
++{
++	struct key *k = kb->duo_hl_key;
++	kb->duo_hl_pending = false;
++	kb->duo_hl_key = NULL;
++	arm(kb->duo_hl_fd, 0);
++	if (k) {
++		kbd_draw_key(kb, k, Unpress);
++		kbd_clear_last_popup(kb);
++	}
++}
++
++/* a new press (or a redraw) comes: finish a held highlight at once */
++void
++duo_hl_flush(struct kbd *kb)
++{
++	if (kb->duo_hl_pending)
++		hl_finish(kb);
++}
++
++/* the whole layout is redrawn: forget it (the key may not be on the new layout) */
++void
++duo_hl_cancel(struct kbd *kb)
++{
++	kb->duo_hl_pending = false;
++	kb->duo_hl_key = NULL;
++	arm(kb->duo_hl_fd, 0);
++}
++
++void
++duo_hl_timer(struct kbd *kb)
++{
++	uint64_t n;
++	if (read(kb->duo_hl_fd, &n, sizeof(n)) < 0)
++		return;
++	if (kb->duo_hl_pending) {
++		hl_finish(kb);
++		drwsurf_flip(kb->surf);
++		drwsurf_flip(kb->popup_surf);
++	}
++}
++
++/* ---- long press ---- */
++/* touch-down on a key: true = we take it (typed on lift / long press) */
++bool
++duo_lp_press(struct kbd *kb, struct key *k)
++{
++	if (kb->compose || k->code_mod || alt_index(k) < 0)
++		return false;
++	kb->duo_lp_key = k;
++	kb->duo_lp_alt = false;
++	kbd_draw_key(kb, k, Press);
++	arm(kb->duo_lp_fd, DUO_LP_MS);
++	buzz(ff_id);
++	return true;
++}
++
++bool
++duo_lp_active(struct kbd *kb)
++{
++	return kb->duo_lp_key != NULL;
++}
++
++static void
++draw_popup(struct kbd *kb, struct key *k, const char *label)
++{
++	struct clr_scheme *scheme = &kb->schemes[k->scheme];
++	kbd_clear_last_popup(kb);
++	kb->last_popup_x = k->x;
++	kb->last_popup_y = kb->h + k->y - k->h;
++	kb->last_popup_w = k->w;
++	kb->last_popup_h = k->h;
++	drw_fill_rectangle(kb->popup_surf, scheme->bg, k->x, kb->last_popup_y, k->w, k->h, scheme->rounding);
++	draw_inset(kb->popup_surf, k->x, kb->last_popup_y, k->w, k->h, KBD_KEY_BORDER, kb->schemes[1].high,
++	           scheme->rounding);
++	drw_draw_text(kb->popup_surf, kb->schemes[1].text, k->x, kb->last_popup_y, k->w, k->h, KBD_KEY_BORDER, label,
++	              scheme->font_description);
++	wl_surface_damage(kb->popup_surf->surf, k->x, kb->last_popup_y, k->w, k->h);
++}
++
++void
++duo_lp_timer(struct kbd *kb)
++{
++	uint64_t n;
++	if (read(kb->duo_lp_fd, &n, sizeof(n)) < 0)
++		return;
++	if (!kb->duo_lp_key || kb->duo_lp_alt)
++		return;
++	kb->duo_lp_alt = true;
++	draw_popup(kb, kb->duo_lp_key, duo_alt_label(kb->duo_lp_key));
++	buzz(ff_long_id);
++	drwsurf_flip(kb->popup_surf);
++}
++
++/* lift (or another finger lands): type what the held key stands for. For the plain character this leaves the key
++ * pressed in kb->last_press, so the caller's normal release path releases it (and unlatches shift). */
++void
++duo_lp_commit(struct kbd *kb, uint32_t time)
++{
++	struct key *k = kb->duo_lp_key;
++	if (!k)
++		return;
++	kb->duo_lp_key = NULL;
++	arm(kb->duo_lp_fd, 0);
++	if (!kb->duo_lp_alt) {
++		zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
++		zwp_virtual_keyboard_v1_key(kb->vkbd, time, k->code, WL_KEYBOARD_KEY_STATE_PRESSED);
++		kb->last_swipe = kb->last_press = k;
++		return;
++	}
++	/* the alternate: as a Copy key does, through a temporary keymap */
++	create_and_upload_keymap(kb, kb->layout->keymap_name, duo_alts[alt_index(k)].code, 0);
++	zwp_virtual_keyboard_v1_modifiers(kb->vkbd, 0, 0, 0, 0);
++	zwp_virtual_keyboard_v1_key(kb->vkbd, time, 127, WL_KEYBOARD_KEY_STATE_PRESSED);
++	zwp_virtual_keyboard_v1_key(kb->vkbd, time, 127, WL_KEYBOARD_KEY_STATE_RELEASED);
++	if (kb->mods & Shift) {
++		kb->mods ^= Shift;
++		kbd_draw_layout(kb);
++	} else {
++		kbd_draw_key(kb, k, Unpress);
++	}
++	zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
++}
+diff -ruN -x *.o -x proto -x wvkbd-mobintl -x debian -x config.h -x .pc -x Makefile -x config.mk orig/wvkbd-0.15/keyboard.c wvkbd-0.15/keyboard.c
+--- orig/wvkbd-0.15/keyboard.c	2024-05-04 11:42:12
++++ wvkbd-0.15/keyboard.c	2026-11-13 14:00:28
+@@ -278,6 +278,8 @@
+ {
+     bool unlatch_shift = false;
+ 
++    duo_lp_commit(kb, time); /* a held key with an alternate: type it now */
++
+     if (kb->last_press) {
+         unlatch_shift = (kb->mods & Shift) == Shift;
+ 
+@@ -335,6 +337,8 @@
+ void
+ kbd_motion_key(struct kbd *kb, uint32_t time, uint32_t x, uint32_t y)
+ {
++    if (duo_lp_active(kb))
++        return; /* a held key waits for its lift / long press; jitter must not release it */
+     // Output intersecting keys
+     // (for external 'swiping'-based accelerators).
+     if (kb->print_intersect) {
+@@ -384,8 +388,13 @@
+         }
+     }
+ 
++    if (!duo_alt_label(k) || kb->compose || k->code_mod)
++        duo_buzz_press(); /* (keys with an alternate buzz in duo_lp_press) */
++
+     switch (k->type) {
+     case Code:
++        if (duo_lp_press(kb, k))
++            break; /* typed on lift, or its alternate after a long press */
+         if (k->code_mod) {
+             if (k->reset_mod) {
+                 zwp_virtual_keyboard_v1_modifiers(kb->vkbd, k->code_mod, 0, 0,
+@@ -538,6 +547,8 @@
+ void
+ kbd_clear_last_popup(struct kbd *kb)
+ {
++    if (duo_hl_pending(kb))
++        return; /* the held highlight's popup goes with it (duo_hl_timer) */
+     if (kb->last_popup_w && kb->last_popup_h) {
+         drw_do_clear(kb->popup_surf, kb->last_popup_x, kb->last_popup_y,
+                      kb->last_popup_w, kb->last_popup_h);
+@@ -557,6 +568,11 @@
+                 label);
+     struct clr_scheme *scheme = &kb->schemes[k->scheme];
+ 
++    if (type == Press)
++        duo_hl_flush(kb);
++    else if (type == Unpress && duo_hl_hold(kb, k))
++        return; /* stays lit a little longer (duo.c) */
++
+     switch (type) {
+     case None:
+     case Unpress:
+@@ -575,7 +591,10 @@
+ 
+     drw_draw_text(kb->surf, scheme->text, k->x, k->y, k->w, k->h,
+                   KBD_KEY_BORDER, label, scheme->font_description);
++    duo_draw_hint(kb, k);
+     wl_surface_damage(kb->surf->surf, k->x, k->y, k->w, k->h);
++    if (type == Press)
++        duo_hl_start(kb, k);
+ 
+     if (type == Press || type == Unpress) {
+         kbd_clear_last_popup(kb);
+@@ -600,6 +619,7 @@
+ void
+ kbd_draw_layout(struct kbd *kb)
+ {
++    duo_hl_cancel(kb);
+     struct drwsurf *d = kb->surf;
+     struct key *next_key = kb->layout->keys;
+     if (kb->debug)
+diff -ruN -x *.o -x proto -x wvkbd-mobintl -x debian -x config.h -x .pc -x Makefile -x config.mk orig/wvkbd-0.15/keyboard.h wvkbd-0.15/keyboard.h
+--- orig/wvkbd-0.15/keyboard.h	2024-05-04 11:42:12
++++ wvkbd-0.15/keyboard.h	2026-11-13 14:00:28
+@@ -119,7 +119,30 @@
+ 	struct zwp_virtual_keyboard_v1 *vkbd;
+ 
+ 	uint32_t last_popup_x, last_popup_y, last_popup_w, last_popup_h;
++
++	/* Surface Duo additions (duo.c) */
++	int duo_lp_fd, duo_hl_fd;
++	struct key *duo_lp_key;
++	bool duo_lp_alt;
++	struct key *duo_hl_key;
++	bool duo_hl_pending;
++	double duo_hl_since;
+ };
++
++void duo_init(struct kbd *kb);
++void duo_buzz_press(void);
++const char *duo_alt_label(const struct key *k);
++void duo_draw_hint(struct kbd *kb, struct key *k);
++void duo_hl_start(struct kbd *kb, struct key *k);
++bool duo_hl_hold(struct kbd *kb, struct key *k);
++bool duo_hl_pending(struct kbd *kb);
++void duo_hl_flush(struct kbd *kb);
++void duo_hl_cancel(struct kbd *kb);
++void duo_hl_timer(struct kbd *kb);
++bool duo_lp_press(struct kbd *kb, struct key *k);
++bool duo_lp_active(struct kbd *kb);
++void duo_lp_timer(struct kbd *kb);
++void duo_lp_commit(struct kbd *kb, uint32_t time);
+ 
+ void draw_inset(struct drwsurf *ds, uint32_t x, uint32_t y, uint32_t width,
+                 uint32_t height, uint32_t border, Color color, int rounding);
+diff -ruN -x *.o -x proto -x wvkbd-mobintl -x debian -x config.h -x .pc -x Makefile -x config.mk orig/wvkbd-0.15/main.c wvkbd-0.15/main.c
+--- orig/wvkbd-0.15/main.c	2024-05-04 11:42:12
++++ wvkbd-0.15/main.c	2026-11-13 14:00:28
+@@ -1040,6 +1040,7 @@
+         die("failed to init virtual keyboard_manager\n");
+     }
+ 
++    duo_init(&keyboard);
+     kbd_init(&keyboard, (struct layout *)&layouts, layer_names_list,
+              landscape_layer_names_list);
+ 
+@@ -1051,11 +1052,16 @@
+     if (!hidden)
+         show();
+ 
+-    struct pollfd fds[2];
++    struct pollfd fds[4];
+     int WAYLAND_FD = 0;
+     int SIGNAL_FD = 1;
++    int DUO_LP_FD = 2, DUO_HL_FD = 3; /* Surface Duo: long press and highlight timers (duo.c) */
+     fds[WAYLAND_FD].events = POLLIN;
+     fds[SIGNAL_FD].events = POLLIN;
++    fds[DUO_LP_FD].fd = keyboard.duo_lp_fd;
++    fds[DUO_LP_FD].events = POLLIN;
++    fds[DUO_HL_FD].fd = keyboard.duo_hl_fd;
++    fds[DUO_HL_FD].events = POLLIN;
+ 
+     fds[WAYLAND_FD].fd = wl_display_get_fd(display);
+     if (fds[WAYLAND_FD].fd == -1) {
+@@ -1079,7 +1085,12 @@
+ 
+     while (run_display) {
+         wl_display_flush(display);
+-        poll(fds, 2, -1);
++        poll(fds, 4, -1);
++
++        if (fds[DUO_LP_FD].revents & POLLIN)
++            duo_lp_timer(&keyboard);
++        if (fds[DUO_HL_FD].revents & POLLIN)
++            duo_hl_timer(&keyboard);
+ 
+         if (fds[WAYLAND_FD].revents & POLLIN)
+             wl_display_dispatch(display);

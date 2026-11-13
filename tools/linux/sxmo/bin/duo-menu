@@ -1,0 +1,25 @@
+#!/bin/sh
+# Surface Duo, Sxmo on Sway (experimental): the Duo menu of one screen (swipe down from the top).  usage: duo-menu [OUT]
+# Open an app, sxmo's system menu, rotation, and the app shown here: move it to the other screen or close it.
+# (The running apps are in the overview: swipe up from the right half of the bottom edge.)
+out=$1
+[ -n "$out" ] || out=$(swaymsg -t get_outputs -r | gojq -r '.[] | select(.focused) | .name')
+swaymsg -q "focus output $out"
+[ "$out" = DSI-1 ] && where="LEFT" || where="RIGHT"
+cur=$(gojq -r --arg o "$out" '.shown[$o] // empty' "$XDG_RUNTIME_DIR/duo-stack.json" 2> /dev/null)
+app=
+[ -n "$cur" ] && app=$(swaymsg -t get_tree -r | gojq -r --argjson i "$cur" \
+	'.. | objects | select(.id == $i) | (.app_id // .window_properties.class // "app")' | head -n1)
+# the actions that change an app come last: a stray first-line pick must never close anything
+pick=$({
+	printf '%s\n' "+ OPEN APP…" "▦ RUNNING APPS…" "⚙ SYSTEM…" "⟳ ROTATION…"
+	[ -n "$app" ] && printf '%s\n' "⇄ MOVE $app TO OTHER SCREEN" "✕ CLOSE $app"
+} | sxmo_dmenu.sh -p "$where" -i)
+case "$pick" in
+	*"OPEN APP"*) exec sxmo_appmenu.sh applications ;;
+	*"RUNNING APPS"*) exec duo-overview "$out" ;;
+	*SYSTEM*) exec sxmo_appmenu.sh ;;
+	*ROTATION*) exec duo-rotation menu ;;
+	*"TO OTHER SCREEN") exec duo-screen moveapp "$out" ;;
+	"✕ CLOSE "*) exec duo-stack close "$out" ;;
+esac

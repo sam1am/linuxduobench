@@ -1,0 +1,50 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""duo-apps: every installed desktop app (Debian packages and Flatpaks) as sxmo menu lines "label ^ 0 ^ command".
+Used by ~/.config/sxmo/hooks/sxmo_hook_apps.sh (Surface Duo, Sxmo trial, 2026-11-13): sxmo's own Apps menu only lists
+the programs it knows by name. Hidden entries (NoDisplay/Hidden) are left out; desktop-specific ones (OnlyShowIn=KDE)
+are kept, since the apps work under Sway too. Terminal apps open in sxmo's terminal."""
+import os, re, shlex
+
+dirs = [os.path.expanduser("~/.local/share")] + os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
+seen, apps = set(), []
+for d in dirs:
+    a = os.path.join(d, "applications")
+    if not os.path.isdir(a):
+        continue
+    for root, _, files in os.walk(a):
+        for f in files:
+            if not f.endswith(".desktop"):
+                continue
+            rel = os.path.relpath(os.path.join(root, f), a).replace("/", "-")
+            if rel in seen:                 # the first data dir wins, as in the XDG spec
+                continue
+            seen.add(rel)
+            e, sec = {}, None
+            try:
+                with open(os.path.join(root, f), errors="replace") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if line.startswith("["):
+                            sec = line
+                        elif sec == "[Desktop Entry]" and "=" in line:
+                            k, v = line.split("=", 1)
+                            e.setdefault(k.strip(), v.strip())
+            except OSError:
+                continue
+            if e.get("Type") != "Application" or e.get("NoDisplay") == "true" or e.get("Hidden") == "true":
+                continue
+            if not e.get("Name") or not e.get("Exec"):
+                continue
+            tx = e.get("TryExec")
+            if tx and not (os.access(tx, os.X_OK) or any(os.access(os.path.join(p, tx), os.X_OK)
+                                                         for p in os.environ.get("PATH", "").split(":"))):
+                continue
+            cmd = re.sub(r"\s*%[fFuUdDnNickvm]", "", e["Exec"]).replace("%%", "%").strip()
+            if e.get("Terminal") == "true":
+                cmd = "sxmo_terminal.sh " + cmd
+            label = e["Name"].replace("^", " ")
+            apps.append((label.lower(), label, cmd.replace("^", " ")))
+
+for _, label, cmd in sorted(apps):
+    print(f"{label} ^ 0 ^ setsid -f sh -c {shlex.quote(cmd)} > /dev/null 2>&1")

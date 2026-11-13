@@ -39,7 +39,7 @@ for p in DSI-1 DSI-2; do C=$(ls -d /sys/class/drm/card*-$p 2>/dev/null | head -1
   elif [ "$(cat $C/status 2>/dev/null)" = connected ] && [ "$(cat $C/dpms 2>/dev/null)" = Off ]; then ok "panel $p blanked (idle)"
   else bad "panel $p off"; fi; done
 t=$(grep -ci "^I:.*Vendor=045e" /proc/bus/input/devices); [ "$t" -ge 2 ] && ok "touch: $t digitizer input devices" || bad "touch: digitizer input missing"
-if pidof phosh > /dev/null; then ok "Phosh running"; elif pidof plasmashell > /dev/null; then ok "Plasma Mobile running"; else warn "no phone shell running (Phosh / Plasma Mobile; desktop session or not logged in?)"; fi
+if pidof phosh > /dev/null; then ok "Phosh running"; elif pidof sway > /dev/null; then ok "Sxmo (sway) running"; else warn "no phone shell running (Phosh / Sxmo; desktop session or not logged in?)"; fi
 
 # --- audio
 grep -q SurfaceDuo /proc/asound/cards && ok "sound card Surface-Duo" || bad "no Surface-Duo sound card"

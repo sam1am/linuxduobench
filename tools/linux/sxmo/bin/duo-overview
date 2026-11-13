@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""duo-overview OUT: the running apps of one Duo screen (Surface Duo, Sxmo on Sway, experimental, 2026-11-13).
+Opened by a swipe up from the right half of the bottom edge (duo-sway-posture); started again while open = close.
+  - a card per app of this screen (icon, name, title): tap = show it, ✕ = close it
+  - the other screen's apps, smaller: tap = bring it to this screen
+  - the app grid button (lower right) opens the app list; CPU / memory / storage at the bottom, live
+  - a tap on the empty space / the header / back closes the overview
+Apps are switched by duo-stack (one app at a time per screen)."""
+import glob, json, os, signal, subprocess, sys, time
+_LS = next(iter(glob.glob("/usr/lib/*/libgtk4-layer-shell.so.0") + glob.glob("/usr/lib/libgtk4-layer-shell.so.0")), "")
+os.environ.setdefault("GTK_A11Y", "none")   # no accessibility bus here: skip looking for it
+if _LS and _LS not in os.environ.get("LD_PRELOAD", ""):
+    os.environ["LD_PRELOAD"] = (_LS + " " + os.environ.get("LD_PRELOAD", "")).strip()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+import gi
+gi.require_version("Gtk", "4.0"); gi.require_version("Gtk4LayerShell", "1.0")
+from gi.repository import Gtk, Gdk, Gio, GLib, Pango, Gtk4LayerShell as LS
+
+LEFT, RIGHT = "DSI-1", "DSI-2"
+WS = {LEFT: "1", RIGHT: "2"}
+RUN = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+PIDF = os.path.join(RUN, "duo-overview.pid")
+CSS = b"""
+window.ov { background: rgba(5,5,10,0.93); }
+.ov * { font-family: "JetBrains Mono"; color: #d7e3ff; }
+.hdr { padding: 14px 16px 6px 16px; }
+.hdr-t { font-weight: 800; font-size: 15px; color: #00f0ff; letter-spacing: 2px; }
+.hdr-n { font-size: 12px; color: #ff2a6d; font-weight: 700; }
+.sec { font-size: 10px; color: #5d6b8a; letter-spacing: 2px; padding: 10px 16px 4px 16px; font-weight: 700; }
+.card { background: #0d0e1a; border: 1px solid #1c1f36; border-radius: 0; padding: 10px; margin: 6px; }
+.card.cur { border-color: #00f0ff; box-shadow: 0 0 10px rgba(0,240,255,0.35); }
+.card-app { font-weight: 800; font-size: 12px; color: #00f0ff; }
+.card-title { font-size: 10px; color: #8fa0c4; }
+.x { background: transparent; border: 1px solid #ff2a6d; border-radius: 0; min-width: 30px; min-height: 30px;
+     padding: 0; color: #ff2a6d; font-weight: 800; }
+.x label { color: #ff2a6d; }
+.row { background: #090a14; border-left: 2px solid #ff2a6d; padding: 8px 10px; margin: 3px 12px; }
+.row-t { font-size: 11px; color: #8fa0c4; }
+.stats { background: #090a14; border-top: 1px solid #1c1f36; padding: 10px 14px 12px 14px; }
+.st-k { font-size: 9px; color: #5d6b8a; letter-spacing: 2px; font-weight: 700; }
+.st-v { font-size: 11px; color: #00f0ff; font-weight: 800; }
+.empty { color: #5d6b8a; font-size: 12px; padding: 30px; letter-spacing: 2px; }
+"""
+
+
+def sway_tree():
+    return json.loads(subprocess.run(["swaymsg", "-t", "get_tree", "-r"], capture_output=True, text=True).stdout)
+
+
+def apps():
+    """id -> (out, ws, app_id, title) for every app window"""
+    res = {}
+
+    def walk(n, out, ws):
+        if n.get("type") == "output":
+            out = n.get("name")
+        if n.get("type") == "workspace":
+            ws = n.get("name")
+        for c in n.get("nodes", []) + n.get("floating_nodes", []):
+            walk(c, out, ws)
+        if n.get("pid") is not None and not n.get("nodes"):
+            res[n["id"]] = (out, ws, n.get("app_id") or (n.get("window_properties") or {}).get("class") or "?",
+                            n.get("name") or "")
+    walk(sway_tree(), None, None)
+    return res
+
+
+def state():
+    try:
+        with open(os.path.join(RUN, "duo-stack.json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"order": {}, "mru": {}, "shown": {}}
+
+
+def app_info(app_id):
+    """(name, Gio.Icon) from the app's .desktop file, if there is one"""
+    for cand in (app_id, app_id.lower()):
+        try:
+            info = Gio.DesktopAppInfo.new(cand + ".desktop")
+        except TypeError:
+            info = None
+        if info:
+            return info.get_name(), info.get_icon()
+    for info in Gio.AppInfo.get_all():
+        wm = info.get_startup_wm_class() if hasattr(info, "get_startup_wm_class") else None
+        if wm and wm.lower() == app_id.lower():
+            return info.get_name(), info.get_icon()
+    return app_id, None
+
+
+def run(*cmd):
+    subprocess.Popen(list(cmd), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+class Stats:
+    """CPU / memory / storage, a value and a thin bar each, refreshed every second"""
+    def __init__(self):
+        self.box = Gtk.Box(spacing=14, homogeneous=True); self.box.add_css_class("stats")
+        self.cells = {}
+        for k in ("CPU", "MEM", "DISK"):
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            top = Gtk.Box()
+            kl = Gtk.Label(label=k, xalign=0); kl.add_css_class("st-k"); kl.set_hexpand(True)
+            vl = Gtk.Label(label="--", xalign=1); vl.add_css_class("st-v")
+            top.append(kl); top.append(vl)
+            bar = Gtk.DrawingArea(); bar.set_content_height(4); bar.set_hexpand(True)
+            bar.frac = 0.0
+            bar.set_draw_func(self.draw_bar)
+            col.append(top); col.append(bar)
+            self.box.append(col)
+            self.cells[k] = (vl, bar)
+        self.prev = self.cpu_times()
+        self.update(first=True)
+        GLib.timeout_add(1000, self.update)
+
+    @staticmethod
+    def draw_bar(a, cr, w, h):
+        f = a.frac
+        cr.set_source_rgba(0.11, 0.12, 0.21, 1); cr.rectangle(0, 0, w, h); cr.fill()
+        cr.set_source_rgba(*((1, 0.16, 0.43, 1) if f >= 0.85 else (0, 0.94, 1, 1)))
+        cr.rectangle(0, 0, w * max(0.0, min(1.0, f)), h); cr.fill()
+
+    @staticmethod
+    def cpu_times():
+        with open("/proc/stat") as f:
+            v = [int(x) for x in f.readline().split()[1:]]
+        idle = v[3] + (v[4] if len(v) > 4 else 0)
+        return sum(v), idle
+
+    def set(self, k, text, frac):
+        vl, bar = self.cells[k]
+        vl.set_label(text); bar.frac = frac; bar.queue_draw()
+
+    def update(self, first=False):
+        try:
+            if not first:
+                tot, idle = self.cpu_times()
+                dt, di = tot - self.prev[0], idle - self.prev[1]
+                self.prev = (tot, idle)
+                u = 1 - di / dt if dt > 0 else 0.0
+                self.set("CPU", f"{u * 100:.0f}%", u)
+            m = {}
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    k, v = line.split(":", 1)
+                    m[k] = int(v.split()[0])
+            used, total = m["MemTotal"] - m["MemAvailable"], m["MemTotal"]
+            self.set("MEM", f"{used / 1048576:.1f}/{total / 1048576:.1f}G", used / total)
+            sv = os.statvfs("/")
+            dtot, dfree = sv.f_blocks * sv.f_frsize, sv.f_bavail * sv.f_frsize
+            self.set("DISK", f"{(dtot - dfree) / 1e9:.0f}/{dtot / 1e9:.0f}G", (dtot - dfree) / dtot)
+        except (OSError, ValueError, KeyError, ZeroDivisionError):
+            pass
+        return True
+
+
+class Overview:
+    def __init__(self, out):
+        self.out = out
+        self.other = RIGHT if out == LEFT else LEFT
+        self.loop = GLib.MainLoop()
+        win = Gtk.Window()
+        win.add_css_class("ov")
+        LS.init_for_window(win)
+        LS.set_layer(win, LS.Layer.OVERLAY)
+        LS.set_namespace(win, "duo-overview")
+        LS.set_keyboard_mode(win, LS.KeyboardMode.ON_DEMAND)
+        LS.set_exclusive_zone(win, -1)
+        for m in Gdk.Display.get_default().get_monitors():
+            if m.get_connector() == out:
+                LS.set_monitor(win, m)
+        for e in (LS.Edge.TOP, LS.Edge.BOTTOM, LS.Edge.LEFT, LS.Edge.RIGHT):
+            LS.set_anchor(win, e, True)
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", lambda _c, kv, *_: (self.quit() if kv == Gdk.KEY_Escape else None) or False)
+        win.add_controller(keys)
+        self.win = win
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        ov = Gtk.Overlay(); ov.set_vexpand(True)
+        self.holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL); self.holder.set_vexpand(True)
+        ov.set_child(self.holder)
+        ov.add_overlay(self.grid_button())
+        root.append(ov)
+        self.stats = Stats()
+        root.append(self.stats.box)
+        win.set_child(root)
+        self.build()
+        win.present()
+
+    def quit(self):
+        self.loop.quit()
+
+    def build(self):
+        allapps, st = apps(), state()
+        mine = [i for i in st.get("order", {}).get(self.out, []) if i in allapps]
+        mine += [i for i, a in allapps.items() if a[1] == WS[self.out] and i not in mine]
+        theirs = [i for i in st.get("order", {}).get(self.other, []) if i in allapps]
+        shown = st.get("shown", {}).get(self.out)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        hdr = Gtk.Box(spacing=10); hdr.add_css_class("hdr")
+        t = Gtk.Label(label="// RUNNING", xalign=0); t.add_css_class("hdr-t"); t.set_hexpand(True)
+        n = Gtk.Label(label=f"{len(mine):02d} {'LEFT' if self.out == LEFT else 'RIGHT'}"); n.add_css_class("hdr-n")
+        hdr.append(t); hdr.append(n)
+        self.tap_closes(hdr)
+        box.append(hdr)
+
+        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True, max_children_per_line=2,
+                           min_children_per_line=2, column_spacing=0, row_spacing=0)
+        flow.set_margin_start(10); flow.set_margin_end(10)
+        for i in mine:
+            flow.append(self.card(i, allapps[i], i == shown))
+        if not mine:
+            e = Gtk.Label(label="NO APPS ON THIS SCREEN"); e.add_css_class("empty")
+            box.append(e)
+        else:
+            box.append(flow)
+
+        if theirs:
+            s = Gtk.Label(label="OTHER SCREEN  ·  TAP TO BRING HERE", xalign=0); s.add_css_class("sec")
+            box.append(s)
+            for i in theirs:
+                box.append(self.row(i, allapps[i]))
+
+        filler = Gtk.Box(); filler.set_vexpand(True); filler.set_size_request(-1, 90); self.tap_closes(filler)
+        box.append(filler)                      # (room under the last card for the grid button)
+        sc = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        sc.set_kinetic_scrolling(True); sc.set_vexpand(True)
+        sc.set_child(box)
+        c = self.holder.get_first_child()
+        if c:
+            self.holder.remove(c)
+        self.holder.append(sc)
+
+    def grid_button(self):
+        """round neon button with a 3x3 app grid, lower right: the app list"""
+        size = 60
+        a = Gtk.DrawingArea(); a.set_content_width(size); a.set_content_height(size)
+        a.set_halign(Gtk.Align.END); a.set_valign(Gtk.Align.END); a.set_margin_end(18); a.set_margin_bottom(16)
+
+        def draw(_a, cr, w, h):
+            import math
+            cx, cy, r = w / 2, h / 2, min(w, h) / 2 - 4
+            for width, alpha in ((8, 0.08), (4, 0.20)):
+                cr.set_source_rgba(0, 0.94, 1, alpha); cr.set_line_width(width)
+                cr.arc(cx, cy, r, 0, 2 * math.pi); cr.stroke()
+            cr.set_source_rgba(0.027, 0.027, 0.05, 0.95); cr.arc(cx, cy, r, 0, 2 * math.pi); cr.fill()
+            cr.set_source_rgba(0, 0.94, 1, 0.95); cr.set_line_width(1.5); cr.arc(cx, cy, r, 0, 2 * math.pi); cr.stroke()
+            q, gap = r * 0.22, r * 0.12                       # the grid: 3 x 3 squares
+            x0 = cx - 1.5 * q - gap
+            for i in range(3):
+                for j in range(3):
+                    cr.set_source_rgba(*((1, 0.16, 0.43, 1) if (i, j) == (1, 1) else (0, 0.94, 1, 1)))
+                    cr.rectangle(x0 + i * (q + gap), cy - 1.5 * q - gap + j * (q + gap), q, q); cr.fill()
+        a.set_draw_func(draw)
+        g = Gtk.GestureClick()
+        g.connect("released", lambda *_: (run("sxmo_appmenu.sh", "applications"), self.quit()))
+        a.add_controller(g)
+        return a
+
+    def tap_closes(self, w):
+        g = Gtk.GestureClick(); g.connect("released", lambda *_: self.quit()); w.add_controller(g)
+
+    def card(self, i, a, cur):
+        _, _, app_id, title = a
+        name, icon = app_info(app_id)
+        ov = Gtk.Overlay()
+        c = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6); c.add_css_class("card")
+        if cur:
+            c.add_css_class("cur")
+        img = Gtk.Image.new_from_gicon(icon) if icon else Gtk.Image.new_from_icon_name("application-x-executable")
+        img.set_pixel_size(44); img.set_halign(Gtk.Align.START)
+        c.append(img)
+        nl = Gtk.Label(label=name.upper(), xalign=0, ellipsize=Pango.EllipsizeMode.END); nl.add_css_class("card-app")
+        tl = Gtk.Label(label=title, xalign=0, ellipsize=Pango.EllipsizeMode.END, lines=2, wrap=True)
+        tl.set_wrap_mode(Pango.WrapMode.WORD_CHAR); tl.add_css_class("card-title")
+        c.append(nl); c.append(tl)
+        g = Gtk.GestureClick()
+        g.connect("released", lambda *_: (run("duo-stack", "show", self.out, str(i)), self.quit()))
+        c.add_controller(g)
+        x = Gtk.Button(label="✕"); x.add_css_class("x")
+        x.set_halign(Gtk.Align.END); x.set_valign(Gtk.Align.START); x.set_margin_top(10); x.set_margin_end(10)
+        x.connect("clicked", lambda *_: self.close(i))
+        ov.set_child(c); ov.add_overlay(x)
+        return ov
+
+    def row(self, i, a):
+        _, _, app_id, title = a
+        name, _ = app_info(app_id)
+        r = Gtk.Box(); r.add_css_class("row")
+        l = Gtk.Label(label=f"{name.upper()}  ·  {title}", xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        l.add_css_class("row-t"); l.set_hexpand(True)
+        r.append(l)
+        g = Gtk.GestureClick()
+        g.connect("released", lambda *_: (run("duo-stack", "show", self.out, str(i)), self.quit()))
+        r.add_controller(g)
+        return r
+
+    def close(self, i):
+        subprocess.run(["swaymsg", f"[con_id={i}] kill"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        GLib.timeout_add(250, lambda: (self.build(), False)[1])
+
+
+def main():
+    out = sys.argv[1] if len(sys.argv) > 1 else LEFT
+    # started again while open: close it (same screen) or move it (other screen)
+    try:
+        pid, was = open(PIDF).read().split()
+        if was == out and time.time() - os.stat(PIDF).st_mtime < 1.5:
+            return                     # a second swipe while it was still opening: keep it open
+        os.kill(int(pid), signal.SIGTERM)
+        if was == out:
+            return
+    except (OSError, ValueError):
+        pass
+    with open(PIDF, "w") as f:
+        f.write(f"{os.getpid()} {out}")
+    css = Gtk.CssProvider(); css.load_from_data(CSS)
+    Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    ov = Overview(out)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda: (ov.quit(), False)[1])
+    try:
+        ov.loop.run()
+    finally:
+        try:
+            if open(PIDF).read().split()[0] == str(os.getpid()):
+                os.unlink(PIDF)
+        except (OSError, IndexError):
+            pass
+
+
+if __name__ == "__main__":
+    main()

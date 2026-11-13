@@ -1,4 +1,4 @@
-# Debian 13 + Plasma Mobile on the `win` partition (tethered)
+# Debian 13 + Sxmo (Sway) on the `win` partition (tethered)
 
 How this fork got a full Debian desktop running from the phone's own storage on a second Surface Duo 1, on
 2026-11-11, **without writing any boot, firmware or partition-table data**. Read [`CLAUDE.md`](../CLAUDE.md) first:
@@ -38,9 +38,11 @@ docker run --rm -it --privileged -v duo-build:/root -v "$PWD":/repo debian:trixi
 # inside:
 NO_EFI=1 /repo/tools/linux/kernel/build.sh /repo           # -> /root/build-duo, ends KERNEL_BUILD_DONE
 /repo/tools/host/make-sensor-debs.sh /repo                  # -> /root/sensor-debs, ends SENSOR_DEBS_DONE
+/repo/tools/linux/sxmo/wvkbd/make-wvkbd.sh /repo            # -> /root/wvkbd-out, ends WVKBD_DONE (the keyboard)
 /repo/tools/host/make-debian-root.sh /repo /root/build-duo /repo/keys.pub /root/duo-debian-root.tar.zst
 ```
-`make-debian-root.sh` runs debootstrap (trixie arm64), installs Plasma Mobile and the Duo services, copies the kernel
+`make-debian-root.sh` runs debootstrap (trixie arm64), installs the desktop (Sxmo on Sway, `tools/linux/sxmo`) and the
+Duo services, copies the kernel
 modules to `/lib/duo/<release>`, installs only `firmware-5.bin` for Wi-Fi, sets up SSH (keys only; `root` and a
 desktop user `user`) and packs a tarball of about 1.2 GB. Stages are resumable. The touch daemon `iptsd` is not in
 Debian; build it first into `/root/iptsd-out` (static meson build of linux-surface iptsd, `--wrap-mode=forcefallback`).
@@ -79,21 +81,22 @@ adb reboot bootloader
 fastboot --set-active=a && fastboot boot duo-debian.img
 ssh root@169.254.66.1        # or the desktop user: ssh user@169.254.66.1
 ```
-Plasma Mobile comes up on both screens after about a minute. To return to Android, `devmem 0x0c264000 w 0` as root.
+Sxmo comes up on both screens after about a minute. To return to Android, `devmem 0x0c264000 w 0` as root.
 
-## Status (2026-11-11, one phone)
-| Works | Built, needs a hands-on test |
+## Status (2026-11-13, one phone)
+The desktop is **Sxmo on Sway** (Plasma Mobile until 2026-11-13: too heavy, and its shell assumes one screen). With
+only the Sxmo session running the phone uses about 0.8 GB of RAM (Plasma: about 5 GB with the same apps).
+
+| Works | Not yet / untested |
 |---|---|
-| Plasma Mobile on both screens, smooth | Auto-rotation of both screens (landscape stacks them) |
-| Touch on both screens, on-screen keyboard | Back screen off when folded back (hinge sensor) |
-| Wi-Fi scan + connect, Chromium browsing | Keyboard haptics (driver fix verified on the I2C bus) |
-| Brightness control, light sensor (lux) | Swipe from a side edge to move an app to the other screen |
-| Quick settings, app drawer, window close | |
-| Status + navigation bar on both screens | **Not yet:** camera, speaker/modem/Bluetooth untested |
-| Sensors: accel, hinge angle, posture, hall, light, proximity | |
-| SSH over USB (ECM, `169.254.66.1`) | |
-
-The home screen (Folio) starts with an empty page; apps are in the drawer (swipe up) and in each screen's dock.
+| Both screens independent: own bar, workspace, touch, gestures, keyboard | Speaker / audio output (next) |
+| One app per screen + overview (switch, close, bring across) | Camera, modem, Bluetooth audio |
+| Rotation: auto, manual, semi-auto (tap a button to confirm) | hingeboard under Sway (not installed) |
+| Fold back: the touched screen turns off, apps stay where they are | |
+| Keyboard with long-press symbols and haptics (patched wvkbd) | |
+| Wi-Fi, Chromium, Discover (Flatpak), Dolphin, foot | |
+| Per-screen brightness, screen off on idle / power key / closing | |
+| Sensors: accel, hinge angle, posture, hall, light, proximity; SSH over USB | |
 
 ## The two-screen layer
 Everything below is installed by `make-debian-root.sh` (sensor packages from `tools/host/make-sensor-debs.sh`).
@@ -102,24 +105,42 @@ Everything below is installed by `make-debian-root.sh` (sensor packages from `to
   `duo-ssc-read` (`tools/linux/sensors/`), a generic SSC reader for the sensors libssc has no class for:
   `duo-ssc-read hinge_angle posture` prints `hinge_angle 188.857 0.000 178.144` (degrees; 0 closed, 180 flat,
   ~355 back to back).
-- **duo-posture** (systemd user unit in the Plasma session, `/usr/libexec/duo/duo-posture`):
-  - rotates both screens together from iio-sensor-proxy's orientation; landscape stacks them (the screen on the upper
-    edge on top), upside down swaps them, the 33 px hinge gap is kept. Plasma's rotation quick setting (auto-rotate
-    policy "Never") locks it.
-  - folded back (hinge >= 330 deg): switches the screen facing away off and disables its touchscreen in KWin, so the
-    hand on the back does nothing; apps move to the front screen. Which screen stays on, in order: **the one you hold
-    a finger on while folding** (exactly one screen touched), the tilt of the accelerometer's half with the mapping
-    learned from earlier finger picks, the screen used last time; with none of these both stay on until the first
-    touch. Turning the folded phone over (tilt reversed for 0.7 s) swaps the screens. Unfolding (<= 310 deg)
-    restores both. Stopping the service restores both screens. State: `~/.local/state/duo-posture.json`.
-  - **swipe along the top of a screen towards the hinge** (start in the top 5 %, at least 40 % of the width, within
-    2 s; both screens open, portrait): that screen's app moves to the other screen.
-  - log: `journalctl --user -u duo-posture`.
+- **The desktop** (`tools/linux/sxmo/`, installed by `tools/linux/sxmo/install.sh`): Debian's Sxmo (sxmo-utils) on
+  Sway, configured for two independent screens. `bin/` goes to `/usr/local/bin`, `config/` to the user's `~/.config`
+  (`sxmo/sway` is the Sway config; `sxmo/hooks/` override sxmo's hooks; sxmo's device profile is
+  `sxmo_deviceprofile_qcom,sm8150-mtp.sh`, named after this kernel's first device-tree compatible).
+  - **Each screen on its own:** own bar, one workspace (left 1, right 2), touchscreen mapped to its panel, its own
+    gestures (one lisgd per touchscreen; `duo-gesture` focuses the screen a gesture came from before acting), its own
+    keyboard and brightness. The only cross-screen action: moving an app (two-finger swipe towards the other screen,
+    the Duo menu, or the overview). Log of every gesture: `journalctl -t duo-gesture`.
+  - **One app per screen** (`duo-stack`): the others wait in sway's scratchpad, remembered per screen; a new app takes
+    its screen, closing one brings back the previous. **Overview** (`duo-overview`, swipe up from the right half of
+    the bottom edge): cards of this screen's apps (tap = show, ✕ = close), the other screen's apps (tap = bring here),
+    an app grid button, CPU / memory / storage.
+  - **Gestures:** down from the top = the Duo menu (open app, overview, sxmo's system menu, rotation, move / close the
+    app); up from the left half of the bottom = keyboard; short swipe in from a side edge = back (closes the overview,
+    a menu, the keyboard, then Alt+Left / Esc in the app); long swipe in from a side edge = next / previous app;
+    along the top edge = that panel's brightness. The bottom-edge swipes are read by `duo-sway-posture` from the
+    touchscreens directly (lisgd cannot tell where along an edge a swipe began); every attempt is logged.
+  - **Menus** close on a tap outside them (`duo-menu-scrim`, put up before bemenu by the `sxmo_dmenu.sh` hook so it is
+    always under the menu).
+  - **Rotation** (`duo-sway-posture`, `duo-rotation menu` or the bottom-right corner swipe): *auto* follows the phone
+    (0.7 s settle), *manual* never rotates by itself, *semi-auto* shows a small rotate button in the bottom-right
+    corner as you now hold the phone (tap within 6 s). Both screens rotate together; landscape stacks them.
+  - **Folded back** (hinge >= 330 deg): the screen facing away is powered off (its apps stay), its touch and gestures
+    are ignored. Which one: **the screen you touch** (or keep a finger on while folding) goes off; otherwise the tilt
+    mapping learned from earlier folds, or the screen used last. Unfolding (<= 310 deg) turns it on again.
+  - **Power key** = screen on / off (sxmo's lock stage, screen on with touch off for 8 s, is skipped). Idle: screens
+    off after about 2 minutes. Screen on/off goes through the `sxmo_wm.sh` hook (sxmo's own thought the screens were
+    off when only the folded-away one was).
+  - **Keyboard:** wvkbd with `wvkbd/wvkbd-0.15-duo.patch` (built by `wvkbd/make-wvkbd.sh` in the container, installed
+    as `/usr/local/bin/wvkbd-mobintl` ahead of Debian's): long press on a letter gives its number / symbol (shown in
+    the key's corner), a pressed key stays lit 90 ms (6 ms taps were never drawn), a click from the haptic motor on
+    every press. Look and size: `~/.config/duo/keyboard-args` (heights are logical px: portrait 250, landscape 210).
+  - **Theme:** near-black with cyan / magenta accents, JetBrains Mono, a horizon-grid wallpaper (`make-wall.py`).
 - **Closing the phone** (`duo-lid`, a system service): screens off at once, **sleep (s2idle) after 30 s closed**
   (`DUO_LID_SLEEP=<s>` in the unit, 0 = never; wake: power key or a touch). The hinge angle drives a virtual lid (uinput
-  `SW_LID`; closed at <= 10 deg, open at >= 25). UPower sees it as a laptop lid, so Plasma's "When laptop lid closed"
-  setting applies: the default here (`/etc/xdg/powerdevilrc`) is *turn off screen*, with "inhibit when an external
-  monitor is present" off (Plasma counts the second screen as external). Opening wakes both screens (duo-posture).
+  `SW_LID`; closed at <= 10 deg, open at >= 25); sway's lid binding turns the screens off and on again.
   logind ignores the lid (`/etc/systemd/logind.conf.d/50-duo-lid.conf`).
 - **Suspend (s2idle), tested 2026-11-12:** works with UFS at the kernel's `spm_lvl` 3 (64 MB write + read-back
   after resume OK; Wi-Fi reconnects). The SLPI's sensor process crashed when hexagonrpcd was frozen during the sleep,
@@ -127,53 +148,31 @@ Everything below is installed by `make-debian-root.sh` (sensor packages from `to
   if it crashed anyway. Wakes: the power key, the touchscreen (spi0.0), the RTC. **Opening the phone does not wake it
   yet:** the hinge sensor's reports arrive over the SLPI's glink channel, whose interrupt does not count as a wakeup
   in s2idle (a kernel change; every other sensor stream would then have to stop before sleep). Idle suspend is off
-  (`AutoSuspendAction=0`: the 2026-11-08 "freeze" was Plasma idle-suspending with nothing to wake it).
+  (`~/.cache/sxmo/sxmo.nosuspend`; the 2026-11-08 "freeze" was Plasma idle-suspending with nothing to wake it).
   Test hooks: `systemctl kill --kill-whom=main -s USR1 duo-lid` = closed for 10 s, `USR2` = open.
-- **App store:** Discover (Plasma Mobile's store) with Flatpak + Flathub only (3,100 arm64 apps on 2026-11-12).
+- **App store:** Discover (KDE's store, without Plasma) with Flatpak + Flathub only (3,100 arm64 apps on 2026-11-12).
   Debian's Discover also carries a PackageKit backend for system packages; it is diverted to
   `.../qt6/plugins/discover-disabled/` so Discover never upgrades Debian packages (the held / diverted Duo ones).
   System updates stay with apt. Undo: `dpkg-divert --rename --remove .../qt6/plugins/discover/packagekit-backend.so`.
-- **Laptop keyboard when stacked** ([hingeboard](https://github.com/brysonwf/hingeboard), vendored in
-  `tools/linux/hingeboard/`): with the phone rotated so the screens are one above the other, duo-posture runs
-  hingeboard on the **lower** screen (apps on the lower screen move up first) and switches maliit off, so typing on
-  the upper screen never opens a keyboard over it. Back to portrait (or folded) = hingeboard stops, maliit returns.
-  Its Exit key closes it until the next time the screens are stacked; never: `touch
-  ~/.config/duo-posture-no-hingeboard`.
-- **KWin script `duo-dualscreen`** (`/usr/share/kwin/scripts/`): the moves behind the top swipe (`DuoMoveFromDSI-1/2`:
-  the app on top of that screen goes across), and Meta+Shift+Right/Left/O for the focused app. Plasma Mobile shows
-  apps maximised without title bars, so there is nothing to drag; this is the replacement. (Side-edge swipes, the
-  first version, felt backwards and are gone.)
-- **Navigation bar per screen** (`tools/linux/debian/plasma-mobile-perscreen/install.sh`, a diverted + patched
-  `NavigationPanelComponent.qml`): each screen's X closes the most recently used app on that screen, not the
-  focused app on either screen.
-- **Sensor proxy fix** (`tools/linux/sensors/iio-sensor-proxy-3.9-early-claim.patch`, 3.9-1+duo1): KWin and
-  duo-posture claim the accelerometer the moment the proxy appears, while it is still opening the sensors; such a
-  claim never started the sensor (orientation and tilt stayed "undefined" = no rotation), and the same race gave the
-  old `'rarray' failed` / `'sensor_device' failed` assertions and 0 lux. The proxy now starts a sensor that was
-  claimed while it was being opened. (KWin's own "Window to Next
-  Screen" is refused under Plasma Mobile's `InteractiveWindowMoveEnabled=false`; the script uses
-  `sendClientToScreen`, which works. Moves only complete while the screens are on: with both DPMS-off KWin renders
-  nothing and apps never commit their new size.)
-- **Developer keyboard** (`tools/linux/debian/maliit-dev/`): maliit's English layout gets a top row with Esc, Tab,
-  sticky Ctrl and Alt (tap = applies to the next key and lights up; Ctrl then c = Ctrl+C, Ctrl then ← = Ctrl+Left)
-  and the four arrows, plus `-` and `/`. Long press: `-` = `_ = + *`, `/` = `\ | ~ \``, `,` = `; : ' " ( ) [ ] { } < >`,
-  `.` = `? ! @ # $ % ^ & *`; the top letter row keeps the digits. Keys go through maliit's `keysequence` action
-  (`QKeySequence::fromString`). The package's layout is diverted (`dpkg-divert`), and a `duo` keyboard profile makes
-  the keyboard 36 % of the screen height (was 30 %) so the extra row keeps the key size.
-- **duo-left-panels** (user unit, once): a status bar and navigation bar on the left screen too.
+- **Sensor proxy fix** (`tools/linux/sensors/iio-sensor-proxy-3.9-early-claim.patch`, 3.9-1+duo1): a client that
+  claims the accelerometer the moment the proxy appears, while it is still opening the sensors, never got the sensor
+  started (orientation and tilt stayed "undefined" = no rotation), and the same race gave the old `'rarray' failed` /
+  `'sensor_device' failed` assertions and 0 lux. The proxy now starts a sensor that was claimed while being opened.
 - **Haptics:** kernel patch 0091 keeps every effect on for at least `min_play_ms`: a 10 ms keyboard click was a
   start + stop that the driver collapsed into "stop" before the motor ever moved. 0092: the clicks are also weak
   (37 %), so any non-zero rumble plays at least `min_rumble_pct` strong; defaults 60 ms and 80 %. Tune live as root:
-  `echo 100 > /sys/module/da7280/parameters/min_play_ms`, `echo 100 > .../min_rumble_pct`.
+  `echo 100 > /sys/module/da7280/parameters/min_play_ms`, `echo 100 > .../min_rumble_pct`. The driver never ends an
+  effect by itself: a client must send the stop (our wvkbd sends start + stop; the driver stretches it to the minimum).
 - **duo-reset:** resets the phone from Debian (no busybox `devmem` there): `systemd-run --on-active=3
   /usr/libexec/duo/duo-reset`.
 
 ## Fixes found on the way (already in this fork)
-- **"Type HomeScreen unavailable" ... "module org.kde.kirigamiaddons.formcard is not installed":** Debian's
-  `plasma-mobile` does not depend on the Kirigami Addons QML modules its home screen imports. `make-debian-root.sh`
-  now installs them, plus `qml6-module-qt-labs-platform`.
-- **Blank icons / "Unsupported image format" for `.svgz`:** with `--no-install-recommends` Qt has no SVG decoder;
-  `qt6-svg-plugins`, `qt6-image-formats-plugins` and `kimageformat6-plugins` are now installed.
+- **SDDM reads every file in `/etc/sddm.conf.d/`:** a backup kept there (`*.conf.plasma`) overrode the real
+  autologin file. Keep backups elsewhere.
+- **Switching desktops from SSH:** restarting sddm ends only the compositor; the old session's systemd user units
+  (Plasma: plasmashell, KWin, PowerDevil) kept running. Log out, or stop those units.
+- **logind reads `logind.conf.d` only at start:** sxmo-utils' `HandlePowerKey=ignore` did not apply until a reboot, and
+  a short power-key press powered the phone off.
 - **macOS hosts:** the USB network needs ECM (now the default; `duo.usbnet=ncm` for NCM) and appears only while the
   Mac is unlocked.
 - **The original `/init`** mounted `esp` read-write and deleted files there; this fork mounts it read-only.

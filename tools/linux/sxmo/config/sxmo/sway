@@ -1,0 +1,161 @@
+# configversion: 88cdbb6305d4ce7c7cdf560a5f5c71e2
+# Surface Duo 1 - Sxmo on Sway, two independent screens (experimental, this phone only, 2026-11-13).
+# Based on /usr/share/sxmo/appcfg/sway_template. Each panel has its own bar, ONE workspace (left 1, right 2) showing
+# one app at a time (duo-stack; the others are in the overview: swipe up from the right half of the bottom edge),
+# touchscreen and gestures; gestures act on the screen they were made on (duo-gesture). The only thing that crosses screens is moving an app: two-finger swipe
+# towards the other screen, the Duo menu (swipe down from the top), or $mod+o.
+# Rotation (auto / manual / semi-auto): duo-sway-posture, chosen with duo-rotation (bottom-right corner swipe).
+
+set $mod Mod4
+set $term sxmo_terminal.sh
+set $menu bemenu-run
+set $L DSI-1
+set $R DSI-2
+
+# ---- the two panels: 1350x1800 at scale 2.5 = 540x720 logical. duo-sway-posture owns transform/position.
+output $L scale 2.5 position 0 0 transform normal bg /home/user/.config/sxmo/duo-wall.png fill
+output $R scale 2.5 position 573 0 transform normal bg /home/user/.config/sxmo/duo-wall.png fill
+output * adaptive_sync off
+
+# ---- each touchscreen (and pen) drives only its own panel (0C02 = left/DSI-1, 0C01 = right/DSI-2)
+input "1118:3074:IPTSD_Virtual_Touchscreen_045E:0C02" map_to_output $L
+input "1118:3073:IPTSD_Virtual_Touchscreen_045E:0C01" map_to_output $R
+input "1118:3074:IPTSD_Virtual_Stylus_045E:0C02" map_to_output $L
+input "1118:3073:IPTSD_Virtual_Stylus_045E:0C01" map_to_output $R
+
+# ---- one workspace per screen, one app shown at a time (duo-stack)
+workspace 1 output $L
+workspace 2 output $R
+exec swaymsg "focus output $R; workspace number 2; focus output $L; workspace number 1"
+
+# sxmo's own setup (buttons, scale), then our per-screen touch mapping on top (it maps every touchscreen to one output)
+exec_always duo-sway-init
+exec_always dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP
+
+mode "menu" {
+    bindsym --input-device=1:1:gpio-keys XF86AudioMute exec nothing # placeholder for sxmo's "menu" mode
+}
+
+# ---- look: minimal neon on black
+set $bg      #07070d
+set $panel   #0d0e1a
+set $line    #1c1f36
+set $dim     #5d6b8a
+set $text    #d7e3ff
+set $cyan    #00f0ff
+set $magenta #ff2a6d
+font pango:JetBrains Mono Bold 9
+default_border pixel 1
+default_floating_border pixel 1
+titlebar_border_thickness 1
+titlebar_padding 8 6
+hide_edge_borders --i3 smart
+smart_borders on
+#                       border    bg      text     indicator  child_border
+client.focused          $cyan     $panel  $cyan    $magenta   $cyan
+client.focused_inactive $line     $bg     $dim     $line      $line
+client.unfocused        $line     $bg     $dim     $line      $line
+client.urgent           $magenta  $bg     $text    $magenta   $magenta
+client.background       $bg
+
+# ---- keys (hardware or Bluetooth keyboard)
+bindsym $mod+Return exec $term
+bindsym $mod+p exec sxmo_appmenu.sh
+bindsym $mod+i exec sxmo_appmenu.sh scripts
+bindsym $mod+Shift+q kill
+bindsym $mod+d exec $menu
+floating_modifier $mod normal
+bindsym $mod+Shift+c reload
+bindsym $mod+Shift+e exec swaynag -t warning -m 'Exit sway (log out)?' -b 'Yes, exit' 'swaymsg exit'
+bindsym $mod+Left focus left
+bindsym $mod+Down focus down
+bindsym $mod+Up focus up
+bindsym $mod+Right focus right
+bindsym $mod+Shift+Left move left
+bindsym $mod+Shift+Down move down
+bindsym $mod+Shift+Up move up
+bindsym $mod+Shift+Right move right
+bindsym $mod+Tab exec duo-screen app "" next
+bindsym $mod+Shift+Tab exec duo-screen app "" prev
+bindsym $mod+Escape exec duo-back
+bindsym $mod+m exec duo-menu
+bindsym $mod+grave exec duo-overview
+bindsym $mod+o exec duo-screen moveapp
+bindsym $mod+r exec duo-rotation menu
+bindsym $mod+1 focus output $L
+bindsym $mod+2 focus output $R
+bindsym $mod+Shift+1 move container to output $L
+bindsym $mod+Shift+2 move container to output $R
+bindsym $mod+b splith
+bindsym $mod+v splitv
+bindsym $mod+f fullscreen
+bindsym $mod+Shift+space floating toggle
+bindsym $mod+space focus mode_toggle
+
+# closing the phone (duo-lid's virtual lid) = screen off; opening = on again
+bindswitch --locked --reload lid:on exec sxmo_hook_screenoff.sh
+bindswitch --locked --reload lid:off exec sxmo_hook_unlock.sh
+
+# ---- one bar per screen, each showing only that screen's workspaces
+bar {
+    id duo-left
+    output $L
+    position top
+    height 22
+    status_command sxmo_status.sh watch
+    pango_markup enabled
+    font pango:JetBrains Mono Bold 8
+    workspace_buttons no
+    status_padding 2
+    status_edge_padding 6
+    colors {
+        background $bg
+        statusline $cyan
+        separator  $magenta
+        focused_background $bg
+        focused_statusline $cyan
+        #                  border   bg       text
+        focused_workspace  $cyan    $cyan    $bg
+        active_workspace   $line    $panel   $cyan
+        inactive_workspace $bg      $bg      $dim
+        urgent_workspace   $magenta $magenta $bg
+    }
+}
+bar {
+    id duo-right
+    output $R
+    position top
+    height 22
+    status_command sxmo_status.sh watch
+    pango_markup enabled
+    font pango:JetBrains Mono Bold 8
+    workspace_buttons no
+    status_padding 2
+    status_edge_padding 6
+    colors {
+        background $bg
+        statusline $cyan
+        separator  $magenta
+        focused_background $bg
+        focused_statusline $cyan
+        focused_workspace  $cyan    $cyan    $bg
+        active_workspace   $line    $panel   $cyan
+        inactive_workspace $bg      $bg      $dim
+        urgent_workspace   $magenta $magenta $bg
+    }
+}
+
+for_window [app_id="foot" title=".*sxmo/modem/.*/draft.txt.*"] resize set height 25
+for_window [title="megapixels"] inhibit_idle open
+
+include /etc/sway/config.d/*
+
+exec 'printf %s "$SWAYSOCK" > "$XDG_RUNTIME_DIR"/sxmo.swaysock'
+exec sxmo_hook_start.sh
+exec systemd-cat -t duo-sway-posture duo-sway-posture
+# tap outside a menu closes it
+exec systemd-cat -t duo-menu-scrim duo-menu-scrim
+# one app at a time per screen, the rest in the overview
+exec systemd-cat -t duo-stack duo-stack daemon
+# what Plasma started for us: password prompts (Discover, pkexec). (OpenSnitch is switched off on this phone.)
+exec /usr/lib/aarch64-linux-gnu/libexec/polkit-kde-authentication-agent-1

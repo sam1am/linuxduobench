@@ -1,0 +1,25 @@
+# Space to setup configversion
+# configversion: b2dba52da9a482ccd1a8170517e502c5
+# Surface Duo, Sxmo (experimental): neon on black
+font=JetBrains Mono 9
+default-timeout=8000
+background-color=#07070df0
+text-color=#d7e3ff
+border-color=#00f0ff
+border-size=1
+border-radius=0
+padding=8
+margin=8
+width=480
+layer=overlay
+group-by=app-name
+
+[urgency=low]
+default-timeout=5000
+text-color=#8fa0c4
+border-color=#1c1f36
+
+[urgency=high]
+default-timeout=0
+text-color=#ffffff
+border-color=#ff2a6d

@@ -1,9 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
 # duo-debian-setup - runs INSIDE the Debian tree (chroot) and makes it a Duo system: packages (Mesa from backports,
-# the Plasma Mobile pieces, our firewall/keyboard apps when sent), the auto-login user, sddm, our system layer units.
+# the desktop's helpers), the auto-login user (sddm into Sxmo on Sway, tools/linux/sxmo), our system layer units.
 # Shared by the dev prepare (duo-debian-prepare.sh, from the PC) and the on-demand installer (installer.md "Slim
-# installer"). Optional inputs in /tmp: opensnitch-rules.sh, waydroid-nft.conf, duo-gps.c, duo-debs/, porchlight/,
+# installer"). Optional inputs in /tmp: waydroid-nft.conf, duo-gps.c, duo-debs/, porchlight/,
 # hingeboard/. apt uses whatever proxy the caller configured (installer: socks5h through the PC's SSH tunnel).
 set -e
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninteractive LANG=C
@@ -14,21 +14,15 @@ apt-get -q -y --no-install-recommends install sddm hexagonrpcd iio-sensor-proxy 
   protection-domain-mapper qrtr-tools umtp-responder avahi-daemon alsa-ucm-conf python3-dbus python3-gi \
   netcat-openbsd psmisc libqmi-utils iproute2 accountsservice \
   kmod wpasupplicant bluez systemd-timesyncd ca-certificates systemd-coredump nftables musl \
-  bluedevil hfd-service kde-cli-tools kio-extras ksystemstats systemsettings \
-  opensnitch python3-opensnitch-ui qtwayland5 chromium gnome-snapshot > /tmp/apt.log 2>&1 \
+  chromium gnome-snapshot > /tmp/apt.log 2>&1 \
   || { tail -5 /tmp/apt.log; exit 1; }
 id user > /dev/null 2>&1 || useradd -m -u 10000 -s /bin/bash -G audio,video,input,render,plugdev,netdev,dialout,sudo user
 passwd -d user > /dev/null
-S=$(ls /usr/share/wayland-sessions | grep -m1 -i plasma-mobile || ls /usr/share/wayland-sessions | grep -m1 -i plasma)
+S=swmo.desktop    # Sxmo on Sway (sxmo-utils); Plasma Mobile until 2026-11-13
 mkdir -p /etc/sddm.conf.d
 printf '[Autologin]\nUser=user\nSession=%s\n\n[General]\nDisplayServer=wayland\n' "$S" > /etc/sddm.conf.d/10-duo-autologin.conf
 echo duo-debian > /etc/hostname
-# OpenSnitch = the allow/deny pop-up firewall (2026-11-08; its UI autostarts in the session, qtwayland5 lets the Qt5 UI
-# open on Wayland). Base rules (loopback, DNS, clock, NetworkManager, ModemManager, avahi, apt) never wait for a pop-up;
-# the process monitor is /proc (this kernel has no syscall tracepoints for its eBPF monitor).
-[ -s /tmp/opensnitch-rules.sh ] && sh /tmp/opensnitch-rules.sh /etc/opensnitchd/rules && rm -f /tmp/opensnitch-rules.sh
-sed -i 's/"ProcMonitorMethod": "ebpf"/"ProcMonitorMethod": "proc"/' /etc/opensnitchd/default-config.json 2>/dev/null
-systemctl enable opensnitch > /dev/null 2>&1 || true
+# (no OpenSnitch since 2026-11-13: its allow/deny pop-ups were hard to answer on the phone; nftables.conf stays)
 [ -f /tmp/porchlight/install.sh ] && sh /tmp/porchlight/install.sh && rm -rf /tmp/porchlight
 if [ -f /tmp/hingeboard/install.sh ]; then
   apt-get -q -y --no-install-recommends install python3-gi python3-gi-cairo python3-cairo python3-evdev gir1.2-gtk-4.0 \
@@ -54,43 +48,17 @@ if [ ! -f /lib/firmware/qca/crbtfw21.tlv ]; then
    cp x/usr/lib/firmware/qca/crbtfw21.tlv* x/usr/lib/firmware/qca/crnv21.bin* /lib/firmware/qca/ && echo "bluetooth firmware: crbtfw21 + crnv21")
   rm -rf /tmp/fwa
 fi
-# NO system suspend (2026-11-08): Plasma's PowerDevil suspended the phone on idle (s2idle) - USB to the PC dropped and
-# the watchdog pauses in suspend, so it looked exactly like a freeze (the "01:58 freeze" was this; nothing woke it).
-# pmOS sleeps only through our duo-sleep; on Debian the sleep targets are masked until that is ported.
-# (Fork, 2026-11-12: s2idle works on this kernel - UFS at the kernel's spm_lvl 3 survives, the SLPI is handled by
-#  duo-sensors-resume - so suspend itself is allowed again; idle suspend stays off in /etc/xdg/powerdevilrc
-#  (AutoSuspendAction=0). Hibernation stays masked: no swap.)
+# Suspend: s2idle works on this kernel (2026-11-12: UFS at the kernel's spm_lvl 3 survives, the SLPI is handled by
+# duo-sensors-resume); only duo-lid suspends (closed for 30 s), sxmo's own idle suspend is off (~/.cache/sxmo/
+# sxmo.nosuspend, tools/linux/sxmo/install.sh). Hibernation stays masked: no swap.
 for t in hibernate.target hybrid-sleep.target suspend-then-hibernate.target; do
   ln -sf /dev/null /etc/systemd/system/$t; done
-# and no lock screen: the auto-login user has no password (no PIN to remember on a single-user phone)
-mkdir -p /home/user/.config
-printf '[Daemon]\nAutolock=false\nLockOnResume=false\n' > /home/user/.config/kscreenlockerrc
-# no KDE Wallet: nothing here needs it (system Wi-Fi profiles, VS Code and
-# Chromium use the basic password store), and its first-use dialog only got in the way
-printf '[Wallet]\nEnabled=false\nFirst Use=false\n' > /home/user/.config/kwalletrc
-# Plasma Mobile's first-start wizard (Wi-Fi, time, cellular, navigation) came back on every boot until it is tapped
-# through; this setup already did all of it -> mark it run ([InitialStart] wizardRun in plasmamobilerc, 6.3.6)
-MRC=/home/user/.config/plasmamobilerc; touch $MRC
-grep -q '^\[InitialStart\]' $MRC || printf '\n[InitialStart]\nwizardRun=true\n' >> $MRC
 # Waydroid (Android apps, 2026-11-08: "Android with user 0 is ready"): the repo + nft networking (our kernel has no
 # legacy iptables); images go to sda10 /waydroid (waydroid init -i /mnt/duo-part/waydroid/images, once, needs Wi-Fi)
 apt-get -q -y install waydroid > /tmp/apt-wd.log 2>&1 || tail -3 /tmp/apt-wd.log
 mkdir -p /etc/systemd/system/waydroid-container.service.d && mv /tmp/waydroid-nft.conf /etc/systemd/system/waydroid-container.service.d/duo-nft.conf
-# touch under KWin (2026-11-08): KWin ignores the wlroots WL_OUTPUT property and mis-applied our udev
-# LIBINPUT_CALIBRATION_MATRIX (dropped one translation: taps landed above the screen). Its own per-device settings
-# fix both: the digitizer (landscape 9600x7200) -> portrait panel = x'=1-y, y'=1-x (row-major 4x4 below, the same
-# matrix as pmOS), 0C01 = DSI-2 (camera side), 0C02 = DSI-1. Measured by injected taps (KWin logs off-screen points).
-mkdir -p /home/user/.config
-cat > /home/user/.config/kcminputrc << 'KCM'
-[Libinput][1118][3073][IPTSD Virtual Touchscreen 045E:0C01]
-CalibrationMatrix=0,-1,1,0,-1,0,1,0,0,0,1,0,0,0,0,1
-OutputName=DSI-2
-
-[Libinput][1118][3074][IPTSD Virtual Touchscreen 045E:0C02]
-CalibrationMatrix=0,-1,1,0,-1,0,1,0,0,0,1,0,0,0,0,1
-OutputName=DSI-1
-KCM
-chown -R user:user /home/user/.config
+# touch: sway applies udev's LIBINPUT_CALIBRATION_MATRIX (digitizer landscape 9600x7200 -> portrait panel) and maps
+# each digitizer to its panel (0C01 = DSI-2, camera side; 0C02 = DSI-1) - ~/.config/sxmo/sway, duo-sway-init
 # /mnt/linux = sda10 as pmOS sees it (iptsd, hexagonrpcd under /mnt/linux/opt/bin): here sda10 is already our root
 # (/init keeps the whole partition at /mnt/duo-part), and a second ro mount is refused -> bind it
 mkdir -p /mnt/linux

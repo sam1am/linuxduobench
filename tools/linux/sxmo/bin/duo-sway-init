@@ -1,0 +1,16 @@
+#!/bin/sh
+# Surface Duo, Sxmo on Sway (experimental): run sxmo's input setup, then undo the part that breaks two screens.
+# sxmo_swayinitconf.sh maps EVERY touchscreen and pen to the focused output; each Duo digitizer belongs to its own panel.
+# Run from the sway config (exec_always), so it also runs again on "swaymsg reload".
+sxmo_swayinitconf.sh
+L=DSI-1 R=DSI-2
+swaymsg -q -- input "1118:3074:IPTSD_Virtual_Touchscreen_045E:0C02" map_to_output $L
+swaymsg -q -- input "1118:3073:IPTSD_Virtual_Touchscreen_045E:0C01" map_to_output $R
+swaymsg -q -- input "1118:3074:IPTSD_Virtual_Stylus_045E:0C02" map_to_output $L
+swaymsg -q -- input "1118:3073:IPTSD_Virtual_Stylus_045E:0C01" map_to_output $R
+# sxmo scales only $SXMO_MONITOR; keep both panels the same
+swaymsg -q -- output $L scale 2.5
+swaymsg -q -- output $R scale 2.5
+# let duo-sway-posture re-check the layout (a reload resets output transforms/positions to the config's)
+duo-rotation relayout 2>/dev/null
+exit 0

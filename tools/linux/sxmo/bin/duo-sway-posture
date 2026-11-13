@@ -1,0 +1,579 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""duo-sway-posture: the Surface Duo's two-screen layout on Sway (Sxmo), driven by its sensors. Experimental (2026-11-13),
+the successor of the KWin duo-posture (Plasma, removed 2026-11-13): same sensors, settle times and fold handling.
+
+Started by ~/.config/sxmo/sway as the desktop user. Inputs:
+  - hinge angle: `duo-ssc-read hinge_angle` (0 closed, 180 flat, ~355 folded back to back)
+  - orientation + tilt: `monitor-sensor --accel` (iio-sensor-proxy)
+  - touches: the two iptsd virtual touchscreens (0C02 = left = DSI-1, 0C01 = right = DSI-2), read-only
+  - commands: $XDG_RUNTIME_DIR/duo-posture.fifo (from duo-rotation)
+Outputs: swaymsg (output transform/position/enable, input events), lisgd restart after a rotation.
+
+Rotation modes (~/.config/duo/rotation-mode, set with `duo-rotation mode ...`):
+  auto    both screens follow the phone (an orientation must hold ROT_SETTLE first)
+  manual  never rotates by itself; the orientation is chosen in the menu and kept (~/.config/duo/rotation-manual)
+  semi    a new orientation shows a small rotate button in the bottom-right corner (as you now hold the phone);
+          tap it within SEMI_TIMEOUT s to rotate, ignore it to stay
+Both screens always rotate together (they are one rigid phone when open); landscape stacks them, the upper edge's screen
+on top. Folded back (hinge >= FOLD_ON): the screen facing away is powered off (its apps stay where they are, the front
+screen is not touched) and its touchscreen and gestures are ignored; which one faces away: the screen you touch
+(or keep a finger on while folding) goes off; then learned from the tilt (~/.local/state/duo-posture.json).
+Bottom edge (both screens, any rotation): a swipe up from the left half = on-screen keyboard on that screen, from the
+right half = the overview of that screen's apps (duo-overview). lisgd cannot tell where along an edge a swipe started,
+so this reads the touches itself (it already does, for the fold).
+Nothing here writes to the phone's storage except the small files in the user's home.
+"""
+import json, os, re, select, signal, struct, subprocess, sys, time
+
+FOLD_ON, FOLD_OFF = 330.0, 310.0     # degrees, with hysteresis
+ROT_SETTLE = 0.7                     # s an orientation must hold before it counts
+ROT_QUIET_OPEN = 1.5                 # s without rotating after the phone was opened
+ROT_MIN_ANGLE = 60.0                 # no rotating while the hinge is below this (closing, nearly closed)
+SEMI_TIMEOUT = 6.0                   # s the semi-auto button stays up
+GAP = 33                             # logical px between the panels (the hinge)
+W, H = 540, 720                      # one panel in logical px, portrait (1350x1800 at scale 2.5)
+LEFT, RIGHT = "DSI-1", "DSI-2"
+WS = {LEFT: "1", RIGHT: "2"}         # the one workspace of each screen (~/.config/sxmo/sway)
+TOUCH ={"045E:0C02": LEFT, "045E:0C01": RIGHT}
+SWAY_INPUTS = {LEFT: ["1118:3074:IPTSD_Virtual_Touchscreen_045E:0C02", "1118:3074:IPTSD_Virtual_Stylus_045E:0C02"],
+               RIGHT: ["1118:3073:IPTSD_Virtual_Touchscreen_045E:0C01", "1118:3073:IPTSD_Virtual_Stylus_045E:0C01"]}
+DEG = {"normal": 0, "right-up": 90, "bottom-up": 180, "left-up": 270}   # sway transform (clockwise)
+ORIENTS = list(DEG)
+MODES = ("auto", "manual", "semi")
+CONF = os.path.expanduser("~/.config/duo")
+MODE_FILE, MANUAL_FILE = os.path.join(CONF, "rotation-mode"), os.path.join(CONF, "rotation-manual")
+STATE = os.path.expanduser("~/.local/state/duo-posture.json")
+RUN = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+FIFO, STATUS = os.path.join(RUN, "duo-posture.fifo"), os.path.join(RUN, "duo-posture.status")
+BACK_FILE = os.path.join(RUN, "duo-back-screen")   # the screen that is off while folded (gestures there are ignored)
+BUTTON = "/usr/local/bin/duo-rotate-button"
+EV = struct.Struct("llHHi")          # struct input_event on 64-bit
+EV_SYN, EV_KEY, EV_ABS, BTN_TOUCH, ABS_X, ABS_Y = 0, 1, 3, 0x14a, 0, 1
+# iptsd's virtual touchscreens report the raw digitizer axes (landscape 9600x7200); on the panel in its native portrait:
+# x = 1 - rawY/maxY, y = 1 - rawX/maxX (0..1, origin top left) - the same as udev's calibration matrix
+RAW_MAX_X, RAW_MAX_Y = 9600, 7200
+# bottom swipe: starts in the lowest 14 % (a finger coming in over the bezel is first seen a little above the edge),
+# rises at least 5 % at its highest point, drifts sideways at most 1.3x its rise, within 1.5 s. A contact the digitizer
+# drops for < 0.12 s and picks up again near the same spot is one stroke (fast swipes lose contact for a frame).
+EDGE_START, EDGE_RISE, EDGE_DRIFT, EDGE_MAX_S = 0.86, 0.05, 1.3, 1.5
+REJOIN_S, REJOIN_D = 0.12, 0.12
+EDGE_LOG = 0.70                     # strokes starting below this are logged (also the rejected ones), for tuning
+
+
+def log(*a):
+    print("duo-sway-posture:", *a, flush=True)
+
+
+def other(o):
+    return RIGHT if o == LEFT else LEFT
+
+
+def sway(cmd):
+    r = subprocess.run(["swaymsg", "--", cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+    if r.returncode:
+        log("swaymsg failed:", cmd, (r.stdout + r.stderr).strip()[:300])
+    return r.returncode == 0
+
+
+def read(path, default=None):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w") as f:
+        f.write(text + "\n")
+    os.replace(path + ".tmp", path)
+
+
+class Posture:
+    def __init__(self):
+        self.angle = None
+        self.mode = self.read_mode()
+        self.orient = read(MANUAL_FILE, "normal") if self.mode == "manual" else "normal"
+        if self.orient not in DEG:
+            self.orient = "normal"
+        self.tilt, self.tilt_since = 0, 0.0
+        self.folded, self.front, self.closed = False, None, False
+        self.applied = None
+        self.faceup, self.last_front = self.load()
+        self.held = {LEFT: False, RIGHT: False}
+        self.picked_by, self.decided_tilt = None, 0
+        self.pending, self.pending_since, self.quiet_until = None, 0.0, 0.0
+        self.button = self.button_target = None
+        self.declined = None                     # semi: the orientation whose button was ignored (no re-prompt)
+        self.input_check_at = None
+
+    # ---------- files ----------
+    def read_mode(self):
+        m = read(MODE_FILE, "auto")
+        return m if m in MODES else "auto"
+
+    def load(self):
+        try:
+            with open(STATE) as f:
+                d = json.load(f)
+            ok = lambda v: v if v in (LEFT, RIGHT) else None
+            return ok(d.get("faceup_output")), ok(d.get("last_front"))
+        except (OSError, ValueError, AttributeError):
+            return None, None
+
+    def save(self):
+        try:
+            with open(STATE) as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            d = {}
+        d.update(faceup_output=self.faceup, last_front=self.last_front)
+        write(STATE, json.dumps(d))
+
+    def status(self):
+        write(STATUS, json.dumps({"mode": self.mode, "orientation": self.orient, "folded": self.folded,
+                                  "front": self.front, "pending": self.button_target}))
+
+    # ---------- layout ----------
+    def back(self):
+        """the screen powered off while folded, else None"""
+        return other(self.front) if self.folded and self.front else None
+
+    def layout(self, rot):
+        w, h = (W, H) if DEG[rot] in (0, 180) else (H, W)
+        if rot == "normal":      pos = {LEFT: (0, 0), RIGHT: (w + GAP, 0)}
+        elif rot == "bottom-up": pos = {RIGHT: (0, 0), LEFT: (w + GAP, 0)}
+        elif rot == "left-up":   pos = {LEFT: (0, 0), RIGHT: (0, h + GAP)}
+        else:                    pos = {RIGHT: (0, 0), LEFT: (0, h + GAP)}
+        return (rot, pos, self.back())
+
+    def apply(self, force=False):
+        want = self.layout(self.orient)
+        if want == self.applied and not force:
+            return
+        rot, pos, off = want
+        cmds = [f"output {o} enable transform {DEG[rot] or 'normal'} position {pos[o][0]} {pos[o][1]}" for o in (LEFT, RIGHT)]
+        # power on first, then off: never both dark at once. While sxmo has the screens off (idle / power button),
+        # only the layout changes: they come on again with sxmo's unlock (sxmo_wm.sh dpms, Duo version)
+        if read(os.path.join(RUN, "sxmo.state"), "unlock") != "screenoff":
+            cmds += [f"output {o} power on" for o in (LEFT, RIGHT) if o != off]
+        cmds += [f"output {o} power off" for o in (LEFT, RIGHT) if o == off]
+        if not sway("; ".join(cmds)):
+            return
+        for o in (LEFT, RIGHT):
+            self.touch_enable(o, o != off)
+        rotated = not self.applied or self.applied[0] != rot
+        self.applied = want
+        write(BACK_FILE, off or "")
+        log("layout", rot, pos, "off", off, "angle", self.angle, "mode", self.mode)
+        if rotated:   # lisgd needs each screen's new orientation
+            subprocess.run(["systemctl", "--user", "restart", "sxmo_hook_lisgd"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=10)
+        self.status()
+
+    def touch_enable(self, out, on):
+        for dev in SWAY_INPUTS[out]:
+            sway(f'input "{dev}" events {"enabled" if on else "disabled"}')
+
+    def input_check(self):
+        """sxmo's lock/unlock switches every screen and touchscreen on or off: keep the back screen dark and its touch
+        off while folded. Runs a moment after sway reports an input or output change (our own too: then nothing to do)."""
+        self.input_check_at = None
+        back = self.back()
+        if not back:
+            return
+        state = read(os.path.join(RUN, "sxmo.state"), "unlock")
+        def get(t):
+            r = subprocess.run(["swaymsg", "-t", t, "-r"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                               timeout=10)
+            try:
+                return json.loads(r.stdout)
+            except ValueError:
+                return []
+        if state != "screenoff" and any(o.get("name") == back and o.get("power") for o in get("get_outputs")):
+            log("back screen was switched on again: off")
+            sway(f"output {back} power off")
+        if any(i.get("identifier") in SWAY_INPUTS[back] and i.get("libinput", {}).get("send_events") != "disabled"
+               for i in get("get_inputs")):
+            log("back screen's touch was switched on again: off")
+            self.touch_enable(back, False)
+
+    def rotate_to(self, o, why):
+        self.button_close()
+        if o == self.orient:
+            return
+        log(f"rotate {self.orient} -> {o} ({why})")
+        self.orient = o
+        if self.mode == "manual":
+            write(MANUAL_FILE, o)
+        self.apply()
+
+    # ---------- semi-auto button ----------
+    def button_place(self, target):
+        """the physical bottom-right corner when the phone is held in `target`, in the screens' current layout"""
+        _, pos, off = self.layout(target)
+        out = max((o for o in pos if o != off), key=lambda o: (pos[o][1], pos[o][0]))
+        k = ((DEG[target] - DEG[self.orient]) // 90) % 4
+        return out, ("tl", "tr", "br", "bl")[(2 + k) % 4]
+
+    def button_open(self, target):
+        self.button_close()
+        out, corner = self.button_place(target)
+        try:
+            self.button = subprocess.Popen([BUTTON, out, corner, str(SEMI_TIMEOUT)], stdout=subprocess.DEVNULL,
+                                           stderr=subprocess.DEVNULL)
+        except OSError as e:
+            log("button failed:", e); return
+        self.button_target = target
+        log(f"semi: {target}? button on {out} {corner}")
+        self.status()
+
+    def button_close(self):
+        if self.button and self.button.poll() is None:
+            self.button.terminate()
+            try:
+                self.button.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.button.kill()
+        had = self.button_target
+        self.button = self.button_target = None
+        if had:
+            self.status()
+
+    def button_check(self):
+        if not self.button or self.button.poll() is None:
+            return
+        rc, target = self.button.returncode, self.button_target
+        self.button = self.button_target = None
+        if rc == 0:
+            self.rotate_to(target, "button")
+        else:
+            self.declined = target
+            log(f"semi: {target} not confirmed")
+            self.status()
+
+    # ---------- commands (duo-rotation) ----------
+    def command(self, line):
+        v = line.split()
+        if not v:
+            return
+        if v[0] == "relayout":
+            self.applied = None; self.apply(force=True)
+        elif v[0] == "reload" or (v[0] == "mode" and len(v) > 1 and v[1] in MODES):
+            m = v[1] if v[0] == "mode" else self.read_mode()
+            write(MODE_FILE, m)
+            if m != self.mode:
+                self.mode = m; self.declined = None
+                log("mode", m)
+                if m == "manual":
+                    self.button_close(); write(MANUAL_FILE, self.orient)
+                elif self.pending:
+                    self.pending_since = 0.0      # re-evaluate the current orientation now
+            self.status()
+        elif v[0] == "set" and len(v) > 1 and v[1] in DEG:
+            if self.mode != "manual":
+                self.mode = "manual"; write(MODE_FILE, "manual"); log("mode manual")
+            write(MANUAL_FILE, v[1])
+            self.rotate_to(v[1], "menu"); self.status()
+        elif v[0] == "cycle":
+            self.command("set " + ORIENTS[(ORIENTS.index(self.orient) + 1) % 4])
+        elif v[0] == "confirm" and self.button_target:
+            self.rotate_to(self.button_target, "confirm")
+
+    # ---------- sensors ----------
+    def on_angle(self, a):
+        self.angle = a
+        if a <= 10.0:
+            self.closed = True
+        elif a >= 25.0 and self.closed:
+            self.closed = False
+            self.quiet_until = time.monotonic() + ROT_QUIET_OPEN   # opening swings through every orientation
+        if not self.folded and a >= FOLD_ON:
+            self.folded, self.front = True, None
+            log(f"folded back ({a:.0f} deg)")
+            self.decide()
+        elif self.folded and a <= FOLD_OFF:
+            self.folded, self.front = False, None
+            log(f"unfolded ({a:.0f} deg)")
+            self.apply()
+
+    def decide(self, touched=None):
+        """Folded: pick the front screen. A finger held on exactly one screen while folding (or the first touch
+        afterwards) turns THAT screen off - the hand on the back is the one touching it - so the other one is the
+        front. Else the learned tilt mapping, or the screen used last time. A choice by touch also teaches the tilt
+        mapping."""
+        if not self.folded or self.front is not None:
+            return
+        held = [o for o, h in self.held.items() if h]
+        pick = why = None
+        if touched:
+            pick, why = other(touched), "touch"         # the touched screen goes off
+        elif len(held) == 1:
+            pick, why = other(held[0]), "held"
+        elif self.faceup and self.tilt:
+            pick, why = (self.faceup if self.tilt > 0 else other(self.faceup)), "tilt"
+        elif self.last_front:
+            pick, why = self.last_front, "last used"
+        if not pick:
+            log("folded: nothing to go by - both screens stay on until a touch")
+            return
+        self.front, self.picked_by, self.decided_tilt = pick, why, self.tilt
+        if why in ("touch", "held") and self.tilt:
+            self.learn()
+        self.last_front = pick
+        self.save()
+        log(f"front screen {pick} ({why}; tilt {self.tilt})")
+        self.button_close()
+        self.apply()
+
+    def learn(self):
+        self.faceup = self.front if self.tilt > 0 else other(self.front)
+        log("learned: folded + face up ->", self.faceup)
+
+    def on_tilt(self, t):
+        sign = {"face-up": 1, "tilted-up": 1, "face-down": -1, "tilted-down": -1}.get(t, 0)
+        if sign != self.tilt:
+            self.tilt, self.tilt_since = sign, time.monotonic()
+
+    def on_orient(self, o):
+        if o in DEG and o != self.pending:
+            self.pending, self.pending_since = o, time.monotonic()
+
+    def tick(self):
+        if self.input_check_at is not None and time.monotonic() >= self.input_check_at:
+            self.input_check()
+        self.button_check()
+        self.orient_tick()
+        if not self.folded:
+            return
+        if self.front is None:
+            if self.faceup and self.tilt:
+                self.decide()
+            return
+        if not self.tilt or time.monotonic() - self.tilt_since < 0.7:
+            return
+        if not self.decided_tilt:
+            self.decided_tilt = self.tilt
+            if self.picked_by in ("touch", "held"):
+                self.learn(); self.save()
+        elif self.tilt == -self.decided_tilt:
+            self.front = other(self.front); self.decided_tilt = self.tilt
+            self.last_front = self.front; self.save()
+            log("turned over ->", self.front)
+            self.apply()
+
+    def orient_tick(self):
+        o = self.pending
+        if o is None:
+            return
+        now = time.monotonic()
+        if now - self.pending_since < ROT_SETTLE or now < self.quiet_until:
+            return
+        if self.angle is not None and self.angle < ROT_MIN_ANGLE:
+            return
+        if self.mode == "manual":
+            return
+        if o == self.orient:
+            self.declined = None
+            if self.button_target:
+                self.button_close()          # turned back: nothing to confirm
+            return
+        if self.mode == "auto":
+            self.rotate_to(o, "auto")
+        elif self.button_target != o and self.declined != o:
+            self.button_open(o)
+
+    def on_stroke(self, out, start, top, secs):
+        """a finger lifted on `out`: a swipe up from the bottom edge opens the keyboard (left half) or the overview.
+        start = first point, top = the highest point it reached (native portrait 0..1)"""
+        if out == self.back() or read(os.path.join(RUN, "sxmo.state"), "unlock") != "unlock":
+            return
+        deg = DEG[self.orient]
+        sx, sy = logical(*start, deg)
+        tx, ty = logical(*top, deg)
+        if sy < EDGE_LOG:
+            return
+        rise, drift = sy - ty, abs(tx - sx)
+        why = None
+        if sy < EDGE_START:
+            why = "started too high"
+        elif rise < EDGE_RISE:
+            why = "too short"
+        elif drift > EDGE_DRIFT * rise:
+            why = "too sideways"
+        elif secs > EDGE_MAX_S:
+            why = "too slow"
+        what = "keyboard" if sx < 0.5 else "overview"
+        log(f"bottom stroke {out}: start {sx:.2f},{sy:.2f} rise {rise:.2f} drift {drift:.2f} {secs:.2f}s -> "
+            + (f"{what}" if not why else f"none ({why})"))
+        if why:
+            return
+        cmd = ["duo-screen", "kbd", out, "open"] if what == "keyboard" else ["duo-overview", out]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def find_touch(self):
+        devs = {}
+        for e in os.listdir("/sys/class/input"):
+            if e.startswith("event"):
+                n = read(f"/sys/class/input/{e}/device/name", "")
+                for k, o in TOUCH.items():
+                    if n == f"IPTSD Virtual Touchscreen {k}":
+                        devs[e] = o
+        return devs
+
+
+def native_xy(st):
+    return 1 - st["y"] / RAW_MAX_Y, 1 - st["x"] / RAW_MAX_X
+
+
+def logical(x, y, deg):
+    """native portrait (x, y) -> the screen's coordinates as shown with sway transform `deg` (clockwise)"""
+    if deg == 90:
+        return y, 1 - x
+    if deg == 180:
+        return 1 - x, 1 - y
+    if deg == 270:
+        return 1 - y, x
+    return x, y
+
+
+def spawn(cmd):
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+
+
+def main():
+    p = Posture()
+
+    def restore(*_):
+        # never leave a screen switched off behind us
+        p.folded, p.front = False, None
+        try:
+            p.button_close()
+            write(BACK_FILE, "")
+            p.apply(force=True)
+        finally:
+            sys.exit(0)
+    signal.signal(signal.SIGTERM, restore)
+    signal.signal(signal.SIGINT, restore)
+    signal.signal(signal.SIGHUP, restore)
+
+    if not os.path.exists(FIFO):
+        os.mkfifo(FIFO, 0o600)
+    fifo = os.open(FIFO, os.O_RDWR | os.O_NONBLOCK)      # RDWR: never sees EOF when a writer goes
+    fbuf = b""
+    log("mode", p.mode, "orientation", p.orient, "learned faceup", p.faceup)
+    hinge = mon = sub = None
+    touchfd, tstate = {}, {}
+    next_spawn, sway_fail = 0.0, 0
+    p.apply(force=True)
+    while True:
+        now = time.monotonic()
+        if now >= next_spawn:
+            if subprocess.run(["swaymsg", "-t", "get_version"], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode:
+                sway_fail += 1
+                if sway_fail >= 3:
+                    log("sway is gone: exit"); p.button_close(); sys.exit(0)
+            else:
+                sway_fail = 0
+            if hinge is None or hinge.poll() is not None:
+                hinge = spawn(["duo-ssc-read", "hinge_angle"])
+            if mon is None or mon.poll() is not None:
+                mon = spawn(["stdbuf", "-oL", "monitor-sensor", "--accel"])
+            if sub is None or sub.poll() is not None:
+                sub = spawn(["swaymsg", "-t", "subscribe", "-m", '["input", "output"]'])
+            if len(touchfd) < 2:
+                for dev, o in p.find_touch().items():
+                    if o not in touchfd.values():
+                        try:
+                            touchfd[os.open(f"/dev/input/{dev}", os.O_RDONLY | os.O_NONBLOCK)] = o
+                        except OSError:
+                            pass
+            next_spawn = now + 5
+        fds = [hinge.stdout, mon.stdout, sub.stdout, fifo] + list(touchfd)
+        waiting = any(st.get("pending") for st in tstate.values())
+        r, _, _ = select.select(fds, [], [], 0.03 if waiting else 0.3)
+        for f in r:
+            if f is hinge.stdout:
+                line = f.readline()
+                if not line:
+                    hinge.wait(); continue
+                v = line.split()
+                if len(v) >= 2 and v[0] == "hinge_angle":
+                    p.on_angle(float(v[1]))
+            elif f is mon.stdout:
+                line = f.readline()
+                if not line:
+                    mon.wait(); continue
+                m = re.search(r"orientation(?: changed)?: ([a-z-]+)", line)
+                if m:
+                    p.on_orient(m.group(1))
+                m = re.search(r"[Tt]ilt(?: changed)?: ([a-z-]+)", line)
+                if m:
+                    p.on_tilt(m.group(1))
+            elif f is sub.stdout:
+                line = f.readline()          # (indented JSON, several lines per event)
+                if not line:
+                    sub.wait(); continue
+                if ('"libinput_config"' in line or '"unspecified"' in line) and p.input_check_at is None:
+                    p.input_check_at = time.monotonic() + 0.3
+            elif f == fifo:
+                try:
+                    fbuf += os.read(fifo, 4096)
+                except BlockingIOError:
+                    pass
+                while b"\n" in fbuf:
+                    line, fbuf = fbuf.split(b"\n", 1)
+                    p.command(line.decode(errors="replace"))
+            else:
+                try:
+                    data = os.read(f, EV.size * 64)
+                except OSError:
+                    os.close(f); p.held[touchfd[f]] = False; del touchfd[f]; tstate.pop(f, None); continue
+                out = touchfd[f]
+                st = tstate.setdefault(f, {"down": False, "x": 0, "y": 0, "start": None, "top": None,
+                                           "lifted": None, "pending": None})
+                for i in range(0, len(data) - EV.size + 1, EV.size):
+                    _, _, typ, code, val = EV.unpack_from(data, i)
+                    if typ == EV_ABS and code == ABS_X:
+                        st["x"] = val
+                    elif typ == EV_ABS and code == ABS_Y:
+                        st["y"] = val
+                    elif typ == EV_KEY and code == BTN_TOUCH:
+                        p.held[out] = bool(val); st["down"] = bool(val)
+                        if val:
+                            st["start"] = None                 # set at the end of this frame (the position follows)
+                            if p.folded and p.front is None:
+                                p.decide(touched=out)
+                        elif st["start"]:
+                            # judged a moment later: the contact may come back (see REJOIN_S)
+                            st["pending"] = (st["start"], st["top"], native_xy(st), time.monotonic())
+                            st["start"] = None
+                    elif typ == EV_SYN and st["down"]:
+                        xy = native_xy(st)
+                        if st["start"] is None:
+                            pend = st["pending"]
+                            if pend and time.monotonic() - pend[3] < REJOIN_S and \
+                                    abs(xy[0] - pend[2][0]) + abs(xy[1] - pend[2][1]) < REJOIN_D:
+                                st["start"], st["top"] = pend[0], pend[1]       # the same stroke, picked up again
+                            else:
+                                st["start"], st["top"] = (*xy, time.monotonic()), xy
+                            st["pending"] = None
+                        # the highest point on the screen as shown (native y vs x depends on the rotation)
+                        deg = DEG[p.orient]
+                        if logical(*xy, deg)[1] < logical(*st["top"], deg)[1]:
+                            st["top"] = xy
+        now = time.monotonic()
+        for f2, st in list(tstate.items()):
+            pend = st.get("pending")
+            if pend and now - pend[3] >= REJOIN_S and f2 in touchfd:
+                st["pending"] = None
+                (sx, sy, t0), top, _, t1 = pend
+                p.on_stroke(touchfd[f2], (sx, sy), top, t1 - t0)
+        p.tick()
+
+
+if __name__ == "__main__":
+    main()

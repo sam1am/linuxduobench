@@ -5,7 +5,8 @@
 `d5c6337855aeb28b5cb14f8f348f8a65c582ddd3` (2026-11-11), GPL-2.0-or-later (`LICENSE`). Its author is this repo's
 original author.
 
-How this fork uses it (Debian + Plasma Mobile, not the labwc laptop session):
+Not installed by default since 2026-11-13 (the Sxmo desktop's on-screen keyboard is wvkbd, tools/linux/sxmo). How the
+fork used it under Debian + Plasma Mobile (removed; kept for reference):
 - `duo-posture` starts it whenever the two screens are stacked (phone rotated to landscape, both screens on, not
   folded): the keyboard fills the **lower** screen, apps live on the upper one, and maliit is switched off
   (KWin `VirtualKeyboard.enabled`), so the keyboard never pops up on the upper screen.

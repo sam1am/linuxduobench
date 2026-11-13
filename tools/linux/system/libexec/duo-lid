@@ -3,11 +3,11 @@
 """duo-lid: the Surface Duo's hinge as a laptop lid switch, and sleep when it stays closed.
 
 Reads the hinge angle (duo-ssc-read hinge_angle: 0 closed, 180 flat) and drives a uinput switch device with SW_LID
-("Surface Duo hinge lid"): closed at <= LID_CLOSE degrees, open again at >= LID_OPEN. UPower and Plasma's power
-management then do what Settings > Power says for "When laptop lid closed" (here: turn the screens off).
+("Surface Duo hinge lid"): closed at <= LID_CLOSE degrees, open again at >= LID_OPEN. The desktop acts on it (sway's
+bindswitch in ~/.config/sxmo/sway: screens off when closed, on when opened).
 Still closed after DUO_LID_SLEEP seconds (default 30; 0 = never): suspend (s2idle). Wake: the power key or a touch on
 a screen (opening the phone does not wake it yet: the hinge sensor's reports are not a wakeup source in s2idle).
-A system service (root, from boot) rather than part of duo-posture: UPower keeps the first lid device it sees and
+A system service (root, from boot) rather than part of duo-sway-posture: UPower keeps the first lid device it sees and
 ignores a replacement, so the device must live as long as the boot. logind ignores the lid (50-duo-lid.conf).
 Test hooks: SIGUSR1 = report closed, SIGUSR2 = report open, for 10 s (hinge readings ignored meanwhile).
 """

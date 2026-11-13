@@ -8,7 +8,7 @@
 #  - the second panel on (two-screen mode: duo.dual=1 or /etc/duo/dual) or off
 #  - a live kernel log on disk (/var/log/duo-kmsg.log, the previous boot's kept as .1)
 # Desktop-specific output layout is a hook: /usr/libexec/duo/duo-hw-desktop <dual 0|1> (desktop/phosh writes phoc.ini;
-# Plasma maps touch through kcminputrc, written once at install).
+# sway maps each touchscreen to its panel in ~/.config/sxmo/sway).
 # usage: duo-hw start|stop
 DUO_NAME=duo-hw; . /usr/libexec/duo/duo-lib.sh
 

@@ -1,0 +1,51 @@
+#!/bin/sh
+# Surface Duo, Sxmo on Sway (experimental): choose how the screens rotate (duo-sway-posture does the rotating).
+#   duo-rotation menu                     the menu (also: bottom-right corner swipe, $mod+r, sxmo's Rotate entries)
+#   duo-rotation mode auto|manual|semi    auto = follows the phone; manual = never by itself;
+#                                         semi = a rotate button appears, tap it to rotate
+#   duo-rotation set normal|left-up|right-up|bottom-up   pick an orientation (switches to manual)
+#   duo-rotation cycle | confirm | relayout | status
+RUN=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+FIFO=$RUN/duo-posture.fifo
+MODEF=$HOME/.config/duo/rotation-mode
+
+send() {
+	[ -p "$FIFO" ] || { echo "duo-sway-posture is not running" >&2; return 1; }
+	timeout 2 sh -c 'printf "%s\n" "$1" > "$2"' _ "$*" "$FIFO"
+}
+mode() { m=$(cat "$MODEF" 2> /dev/null); case "$m" in auto|manual|semi) echo "$m" ;; *) echo auto ;; esac; }
+
+case "$1" in
+mode)
+	case "$2" in auto|manual|semi) ;; *) echo "mode auto|manual|semi" >&2; exit 1 ;; esac
+	mkdir -p "${MODEF%/*}"; echo "$2" > "$MODEF"
+	send reload 2> /dev/null; exit 0 ;;
+set) send "set $2" ;;
+cycle|confirm|relayout) send "$1" ;;
+status) cat "$RUN/duo-posture.status" 2> /dev/null || echo "{\"mode\": \"$(mode)\"}"; echo ;;
+menu)
+	. sxmo_common.sh 2> /dev/null
+	m=$(mode)
+	dot() { [ "$m" = "$1" ] && printf '●' || printf '○'; }
+	pick=$(printf '%s\n' \
+		"$(dot auto) AUTO       follow the phone" \
+		"$(dot semi) SEMI       tap to confirm" \
+		"$(dot manual) MANUAL     stay put" \
+		"── orientation (manual) ──" \
+		"▮▮ portrait" \
+		"▮▮ portrait, flipped" \
+		"▬ landscape, left side up" \
+		"▬ landscape, right side up" \
+		"close" | sxmo_dmenu.sh -p "ROTATION" -i)
+	case "$pick" in
+		*AUTO*) exec "$0" mode auto ;;
+		*SEMI*) exec "$0" mode semi ;;
+		*MANUAL*) exec "$0" mode manual ;;
+		*"portrait, flipped") exec "$0" set bottom-up ;;
+		*portrait) exec "$0" set normal ;;
+		*"left side up") exec "$0" set left-up ;;
+		*"right side up") exec "$0" set right-up ;;
+		*"──"*) exec "$0" menu ;;
+	esac ;;
+*) sed -n '2,8p' "$0"; exit 1 ;;
+esac

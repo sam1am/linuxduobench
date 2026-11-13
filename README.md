@@ -10,7 +10,8 @@ Qualcomm Snapdragon 855 / SM8150, codename "epsilon".
 > **Temporarily not maintained** - our test phone is bricked; we're looking for a cheap Surface Duo to continue.
 > Forks and patches welcome. Open items and notes: [`docs/`](docs/README.md).
 
-> **This fork:** Debian 13 + Plasma Mobile running from the `win` partition of a second Duo 1, booted tethered,
+> **This fork:** Debian 13 + Sxmo on Sway (two independent screens) running from the `win` partition of a second Duo 1,
+> booted tethered,
 > with no boot partition ever written: [`docs/debian-on-win.md`](docs/debian-on-win.md). Safety rules: [`CLAUDE.md`](CLAUDE.md).
 
 ## Drivers only

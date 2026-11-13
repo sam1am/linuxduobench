@@ -1,0 +1,9 @@
+[Unit]
+Description=run user defined lisgd start hook (Surface Duo: one lisgd per screen)
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=1
+ExecStart=%h/.config/sxmo/hooks/sxmo_hook_lisgdstart.sh
+KillMode=process

@@ -12,6 +12,5 @@ pmos/80-duo-udisks-hide-ufs.rules:etc/udev/rules.d/80-duo-udisks-hide-ufs.rules
 pmos/50-duo-sensor-claim.rules:etc/polkit-1/rules.d/50-duo-sensor-claim.rules
 debian/52-duo-default-volume.conf:etc/wireplumber/wireplumber.conf.d/52-duo-default-volume.conf
 debian/nftables.conf:etc/nftables.conf
-debian/org.duo.HingeGap.desktop:etc/xdg/autostart/org.duo.HingeGap.desktop
 debian/chromium-duo:etc/chromium.d/duo
 debian/81-duo-ssc.rules:etc/udev/rules.d/81-duo-ssc.rules
